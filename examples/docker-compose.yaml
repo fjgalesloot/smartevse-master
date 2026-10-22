@@ -1,0 +1,23 @@
+services:
+  evse-master:
+    build: ..
+    restart: unless-stopped
+    command:
+      - -port=/dev/ttyUSB0          # or tcp://192.168.1.50:502 (transparent RS485 gateway, raw RTU)
+      - -max-mains=25
+      - -nodes=1:16,2:16
+      # - -sim                       # no hardware: simulated Sensorbox + nodes (see evcc.yaml)
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+    group_add:
+      - "20"                         # gid of the serial device on the host: stat -c %g /dev/ttyUSB0
+    ports:
+      - "7090:7090"
+
+  evcc:
+    image: evcc/evcc:latest
+    restart: unless-stopped
+    volumes:
+      - ./evcc.yaml:/etc/evcc.yaml
+    ports:
+      - "7070:7070"

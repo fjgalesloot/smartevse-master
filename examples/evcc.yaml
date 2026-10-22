@@ -1,0 +1,87 @@
+# evcc configuration for two SmartEVSE-3 units (Node 1 / Node 2) behind evse-master.
+#
+# evse-master enforces MaxMains on its own; evcc only enables/disables each
+# node and sets its current. If evcc stops, nodes keep the last enable/current
+# evcc sent and stay within MaxMains. If evse-master stops, the nodes stop
+# charging after ~11 s (CT_NOCOMM).
+#
+# Only the chargers and loadpoints are shown; add your site, grid meter etc.
+# Host name: "evse-master" in docker-compose, otherwise the host running it.
+#
+# Testing without hardware: start evse-master with -sim, then plug in a car:
+#   curl -X POST 'http://evse-master:7090/api/sim/nodes/1?connected=true&wants=true'
+# Other sim controls: POST /api/sim/house?value=5,5,5, POST /api/sim/sensorbox?offline=true,
+# POST /api/sim/nodes/{id}?offline=|carmax=|phases=; GET /api/sim shows the real mains.
+
+chargers:
+  - name: smartevse1
+    type: custom
+    status: # A, B or C; fails while the node is offline
+      source: http
+      uri: http://evse-master:7090/api/nodes/1
+      jq: .status
+      timeout: 5s
+    enabled:
+      source: http
+      uri: http://evse-master:7090/api/nodes/1
+      jq: .enabled
+      timeout: 5s
+    enable:
+      source: http
+      method: POST
+      uri: http://evse-master:7090/api/nodes/1/enable?value={{.enable}}
+      timeout: 5s
+    maxcurrent:
+      source: http
+      method: POST
+      uri: http://evse-master:7090/api/nodes/1/current?value={{.maxcurrent}}
+      timeout: 5s
+    maxcurrentmillis: # optional, SmartEVSE supports 0.1 A steps
+      source: http
+      method: POST
+      uri: http://evse-master:7090/api/nodes/1/current?value={{.maxcurrentmillis}}
+      timeout: 5s
+
+  - name: smartevse2
+    type: custom
+    status:
+      source: http
+      uri: http://evse-master:7090/api/nodes/2
+      jq: .status
+      timeout: 5s
+    enabled:
+      source: http
+      uri: http://evse-master:7090/api/nodes/2
+      jq: .enabled
+      timeout: 5s
+    enable:
+      source: http
+      method: POST
+      uri: http://evse-master:7090/api/nodes/2/enable?value={{.enable}}
+      timeout: 5s
+    maxcurrent:
+      source: http
+      method: POST
+      uri: http://evse-master:7090/api/nodes/2/current?value={{.maxcurrent}}
+      timeout: 5s
+    maxcurrentmillis:
+      source: http
+      method: POST
+      uri: http://evse-master:7090/api/nodes/2/current?value={{.maxcurrentmillis}}
+      timeout: 5s
+
+loadpoints:
+  - title: Carport left
+    charger: smartevse1
+    mode: pv
+    mincurrent: 6
+    maxcurrent: 16 # keep <= the -nodes cap; evse-master clamps anyway
+    # The SmartEVSE nodes report no power; add a charge meter for accurate PV
+    # control, otherwise evcc estimates power from the current it set.
+    # meter: evse1-meter
+
+  - title: Carport right
+    charger: smartevse2
+    mode: pv
+    mincurrent: 6
+    maxcurrent: 16
