@@ -50,24 +50,46 @@ type SimNode struct {
 	CarMaxA   float64 // what the car draws at most
 	Phases    int     // 1 or 3
 
+	// EV meter: node setting (reg 0x0108/0x0109) and the meter itself, a
+	// separate device on the bus that answers at MeterAddr. Only Eastron3P is
+	// simulated, with its registers written out here independent of the master.
+	MeterType    int
+	MeterAddr    int
+	MeterOffline bool    // meter does not answer
+	MeterKWh     float64 // meter total
+	CfgChanged   bool    // reg 0x0006: settings saved, master clears it
+
 	// firmware state
 	State       int
 	Err         int
-	ChargeDelay int // seconds
-	Timeout     int // seconds until CT_NOCOMM
-	PWM         int // advertised current, 0.1 A
+	ChargeDelay int     // seconds
+	Timeout     int     // seconds until CT_NOCOMM
+	EVTimeout   int     // seconds until EV_NOCOMM
+	HeardKWh    float64 // energy the node picked up from its meter's answers (its OCPP meter value)
+	PWM         int     // advertised current, 0.1 A
 
 	acc time.Duration
 }
 
+// COMMEVTimeout is the firmware's COMM_EVTIMEOUT in seconds (8 × NR_EVSES).
+const COMMEVTimeout = 8 * NrEVSEs
+
+// sim Eastron3P registers (SDM630 input registers)
+const (
+	simEastronCurrent = 0x0006 // L1-L3 current, then L1-L3 power: 12 registers
+	simEastronEnergy  = 0x0048 // total import kWh: 2 registers
+)
+
 // NewSim creates a simulator with nodes for the given ids (1..7), each with
-// a 3-phase car that is not yet connected.
+// a 3-phase car that is not yet connected and an Eastron3P EV meter at
+// address 16 + id.
 func NewSim(ids ...int) *Sim {
 	s := &Sim{now: time.Unix(1_700_000_000, 0), Nodes: map[byte]*SimNode{}}
 	for _, id := range ids {
 		s.Nodes[byte(id+1)] = &SimNode{
 			MaxA: 16, Mode: ModeSmart, CarMaxA: 16, Phases: 3,
-			Timeout: COMMTimeout, PWM: 60,
+			MeterType: MeterEastron3P, MeterAddr: 16 + id, MeterKWh: 1000 * float64(id),
+			Timeout: COMMTimeout, EVTimeout: COMMTimeout, PWM: 60,
 		}
 	}
 	return s
@@ -96,6 +118,7 @@ func (s *Sim) Advance(d time.Duration) {
 		}
 		s.now = s.now.Add(step)
 		for _, n := range s.Nodes {
+			n.MeterKWh += n.EVCurrent() * float64(n.Phases) * 230 * step.Hours() / 1000
 			n.acc += step
 			for n.acc >= time.Second {
 				n.acc -= time.Second
@@ -187,8 +210,21 @@ func (n *SimNode) tick1s() {
 	} else if n.Timeout > 0 {
 		n.Timeout--
 	}
+	if n.MeterType != 0 {
+		if n.EVTimeout == 0 && n.Err&ErrEVNoComm == 0 && n.Mode != ModeNormal {
+			n.Err |= ErrEVNoComm
+			n.powerUnavailable()
+		} else if n.EVTimeout > 0 {
+			n.EVTimeout--
+		}
+	} else {
+		n.EVTimeout = COMMEVTimeout
+	}
 	if n.Err&ErrCTNoComm != 0 && n.Timeout > 0 {
 		n.Err &^= ErrCTNoComm
+	}
+	if n.Err&ErrEVNoComm != 0 && n.EVTimeout > 0 {
+		n.Err &^= ErrEVNoComm
 	}
 	if n.Err&ErrLess6A != 0 {
 		n.powerUnavailable()
@@ -278,10 +314,18 @@ func (s *Sim) Write(f []byte) (int, error) {
 				s.reply(addr, fc, s.sensorboxRegs(count))
 			}
 		} else if n, ok := s.Nodes[addr]; ok && !n.Offline && reg == regNodeStatus {
+			cfg := uint16(0)
+			if n.CfgChanged {
+				cfg = 1
+			}
 			s.reply(addr, fc, []uint16{
 				uint16(n.State), uint16(n.Err), uint16(n.PWM), uint16(n.Mode),
-				0, 1, 0, uint16(n.MaxA),
+				0, 1, cfg, uint16(n.MaxA),
 			}[:count])
+		} else if ok && !n.Offline && reg == regNodeEVMeter && count == 2 {
+			s.reply(addr, fc, []uint16{uint16(n.MeterType), uint16(n.MeterAddr)})
+		} else if m := s.meterAt(addr); m != nil {
+			s.meterRequest(m, reg, count)
 		}
 	case 0x10:
 		count := int(binary.BigEndian.Uint16(f[4:6]))
@@ -331,10 +375,65 @@ func (s *Sim) Write(f []byte) (int, error) {
 					n.writeError(int(val))
 				}
 			}
+		} else if n, ok := s.Nodes[addr]; ok && !n.Offline && reg == regNodeCfgChanged {
+			n.CfgChanged = val != 0
+			s.rx = append(s.rx, f...)
 		}
 	}
 	s.Log = append(s.Log, frame)
 	return len(f), nil
+}
+
+// meterAt returns the node whose EV meter answers at addr.
+func (s *Sim) meterAt(addr byte) *SimNode {
+	for _, n := range s.Nodes {
+		if n.MeterType == MeterEastron3P && n.MeterAddr == int(addr) && !n.MeterOffline {
+			return n
+		}
+	}
+	return nil
+}
+
+// meterRequest answers a read of an Eastron3P meter. Nodes listening for that
+// address take the answer as the firmware does (MBEVMeterResponse): the
+// register comes from the request they saw just before.
+func (s *Sim) meterRequest(m *SimNode, reg, count uint16) {
+	var vals []float64
+	switch {
+	case reg == simEastronCurrent && count == 12:
+		i := m.EVCurrent()
+		for p := 0; p < 3; p++ {
+			if p >= m.Phases {
+				i = 0
+			}
+			vals = append(vals, i)
+		}
+		for p := 0; p < 3; p++ {
+			vals = append(vals, vals[p]*230)
+		}
+	case reg == simEastronEnergy && count == 2:
+		vals = []float64{m.MeterKWh}
+	default:
+		return // the meter answers with an exception; the master gets a timeout here
+	}
+	regs := make([]uint16, 0, len(vals)*2)
+	for _, v := range vals {
+		bits := math.Float32bits(float32(v))
+		regs = append(regs, uint16(bits>>16), uint16(bits))
+	}
+	s.reply(byte(m.MeterAddr), 0x04, regs)
+
+	for _, n := range s.Nodes {
+		if n.Offline || n.MeterType != MeterEastron3P || n.MeterAddr != m.MeterAddr {
+			continue
+		}
+		switch reg {
+		case simEastronCurrent:
+			n.EVTimeout = COMMEVTimeout
+		case simEastronEnergy:
+			n.HeardKWh = float64(float32(m.MeterKWh))
+		}
+	}
 }
 
 func (s *Sim) reply(addr, fc byte, regs []uint16) {

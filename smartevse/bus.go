@@ -64,12 +64,18 @@ var ErrBusDown = errors.New("bus not connected")
 
 // ReadInput reads count input registers (function 0x04) and returns the raw data bytes.
 func (b *Bus) ReadInput(addr byte, reg, count uint16) ([]byte, error) {
-	req := []byte{addr, 0x04, byte(reg >> 8), byte(reg), byte(count >> 8), byte(count)}
+	return b.Read(addr, 0x04, reg, count)
+}
+
+// Read reads count holding (fc 0x03) or input (fc 0x04) registers and returns
+// the raw data bytes.
+func (b *Bus) Read(addr, fc byte, reg, count uint16) ([]byte, error) {
+	req := []byte{addr, fc, byte(reg >> 8), byte(reg), byte(count >> 8), byte(count)}
 	resp, err := b.transact(appendCRC(req), 5+int(count)*2)
 	if err != nil {
 		return nil, err
 	}
-	if resp[1] != 0x04 || int(resp[2]) != int(count)*2 {
+	if resp[1] != fc || int(resp[2]) != int(count)*2 {
 		return nil, fmt.Errorf("addr %d: unexpected response % x", addr, resp)
 	}
 	return resp[3 : 3+int(count)*2], nil

@@ -11,7 +11,8 @@
 # Testing without hardware: start evse-master with -sim, then plug in a car:
 #   curl -X POST 'http://evse-master:7090/api/sim/nodes/1?connected=true&wants=true'
 # Other sim controls: POST /api/sim/house?value=5,5,5, POST /api/sim/sensorbox?offline=true,
-# POST /api/sim/nodes/{id}?offline=|carmax=|phases=; GET /api/sim shows the real mains.
+# POST /api/sim/nodes/{id}?offline=|meteroffline=|carmax=|phases=; GET /api/sim shows the
+# real mains and per node the meter total and the energy the node itself would report (OCPP).
 
 chargers:
   - name: smartevse1
@@ -41,6 +42,16 @@ chargers:
       method: POST
       uri: http://evse-master:7090/api/nodes/1/current?value={{.maxcurrentmillis}}
       timeout: 5s
+    power: # optional, from the node's EV meter (polled by evse-master)
+      source: http
+      uri: http://evse-master:7090/api/nodes/1
+      jq: .meter.powerW
+      timeout: 5s
+    energy: # optional, EV meter total in kWh
+      source: http
+      uri: http://evse-master:7090/api/nodes/1
+      jq: .meter.energyKWh
+      timeout: 5s
 
   - name: smartevse2
     type: custom
@@ -69,6 +80,16 @@ chargers:
       method: POST
       uri: http://evse-master:7090/api/nodes/2/current?value={{.maxcurrentmillis}}
       timeout: 5s
+    power:
+      source: http
+      uri: http://evse-master:7090/api/nodes/2
+      jq: .meter.powerW
+      timeout: 5s
+    energy:
+      source: http
+      uri: http://evse-master:7090/api/nodes/2
+      jq: .meter.energyKWh
+      timeout: 5s
 
 loadpoints:
   - title: Carport left
@@ -76,9 +97,9 @@ loadpoints:
     mode: pv
     mincurrent: 6
     maxcurrent: 16 # keep <= the -nodes cap; evse-master clamps anyway
-    # The SmartEVSE nodes report no power; add a charge meter for accurate PV
-    # control, otherwise evcc estimates power from the current it set.
-    # meter: evse1-meter
+    # Charge power and energy come from the charger's power/energy above (the
+    # node's EV meter). Without an EV meter on the node, drop those and evcc
+    # estimates power from the current it set.
 
   - title: Carport right
     charger: smartevse2

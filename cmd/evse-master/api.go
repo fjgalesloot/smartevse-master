@@ -129,6 +129,11 @@ type simNodeInfo struct {
 	Errors    int     `json:"errors"`
 	PWMA      float64 `json:"pwmA"`
 	DrawA     float64 `json:"drawA"`
+
+	MeterAddress int     `json:"meterAddress"`
+	MeterOffline bool    `json:"meterOffline"`
+	MeterKWh     float64 `json:"meterKWh"`
+	HeardKWh     float64 `json:"heardKWh"` // what the node reports over OCPP
 }
 
 type simInfo struct {
@@ -155,6 +160,7 @@ func (a *api) simInfo() simInfo {
 				ID: id, Offline: n.Offline, Connected: n.Connected, Wants: n.Wants,
 				CarMaxA: n.CarMaxA, Phases: n.Phases, State: smartevse.StateName(n.State),
 				Errors: n.Err, PWMA: float64(n.PWM) / 10, DrawA: n.EVCurrent(),
+				MeterAddress: n.MeterAddr, MeterOffline: n.MeterOffline, MeterKWh: n.MeterKWh, HeardKWh: n.HeardKWh,
 			})
 		}
 	})
@@ -194,7 +200,8 @@ func (a *api) simSensorbox(w http.ResponseWriter, r *http.Request) {
 }
 
 // simNode changes the car or bus connection of a simulated node. All
-// parameters are optional: connected, wants, offline (bool), carmax (A), phases.
+// parameters are optional: connected, wants, offline, meteroffline (bool),
+// carmax (A), phases.
 func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil || a.sim.Node(id) == nil {
@@ -207,7 +214,7 @@ func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 		carMax *float64
 		phases *int
 	)
-	for _, k := range []string{"connected", "wants", "offline"} {
+	for _, k := range []string{"connected", "wants", "offline", "meteroffline"} {
 		if !q.Has(k) {
 			continue
 		}
@@ -245,6 +252,9 @@ func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 		}
 		if v, ok := bools["offline"]; ok {
 			n.Offline = *v
+		}
+		if v, ok := bools["meteroffline"]; ok {
+			n.MeterOffline = *v
 		}
 		if carMax != nil {
 			n.CarMaxA = *carMax

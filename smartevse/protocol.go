@@ -48,6 +48,8 @@ const (
 
 	regNodeStatus     = 0x0000 // 8 input registers: state, error, current, mode, solartimer, access, cfgchanged, max
 	regNodeError      = 0x0001
+	regNodeCfgChanged = 0x0006 // set by the node when its settings were saved; the master clears it
+	regNodeEVMeter    = 0x0108 // 2 registers: EV meter type, EV meter address
 	regBroadcastLoad  = 0x0020 // 8 balance currents + 3 mains currents (0.1 A)
 	nodeStatusRegs    = 8
 	broadcastLoadRegs = NrEVSEs + 3

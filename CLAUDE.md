@@ -14,6 +14,11 @@ stays enforced outside evcc. Goal: later port `smartevse/` into evcc as a charge
   (`COMM_TIMEOUT`) → built-in fail-safe if this daemon dies.
 - Nodes trust the master blindly: `SetCurrent()` only clamps to 80 A. This master MUST
   cap each node at its reported max (reg 0x0007) and the configured hard cap.
+- Nodes never poll their own EV meter: the master does (ModbusRequestLoop states 3-5,
+  20) and the node listens to the answers (`MBEVMeterResponse`). Without it a node with
+  an EV meter set gets EV_NOCOMM after 64 s (`COMM_EVTIMEOUT`, ~11 s after boot or a
+  settings save) in Smart/Solar and stops, and its OCPP meter values (`EVMeter.Energy`)
+  stay stale.
 
 ## Protocol (RS485, 9600 8N1)
 
@@ -29,6 +34,12 @@ stays enforced outside evcc. Goal: later port `smartevse/` into evcc as a charge
 - Mains lost: set CT_NOCOMM on nodes and STOP broadcasting (mirrors firmware).
 - Sensorbox-2: addr 0x0A, FC04 reg 0x0000, 20 regs. reg1 low byte: 0x80 = P1, else CT.
   P1 amps at reg 0x0008, CT amps at reg 0x000E, float32 big-endian, A.
+- EV meter setting: status byte 13 (reg 0x0006) = config changed → FC04 reg 0x0108,
+  2 regs (type = byte 1, address = byte 3), then FC06 reg 0x0006 = 0 to clear the flag.
+- EV meter reads: the node takes the register of an answer from the request it saw just
+  before, and only acts on IRegister (current: resets its timeout), ERegister (energy)
+  and PRegister (power) of its type, so requests must match the firmware exactly
+  (EMConfig in meter.cpp, requestCurrentMeasurement in modbus.cpp).
 
 ## Status
 
@@ -40,15 +51,22 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   backoff 1 s doubling to 30 s, so a device missing at startup is handled like one
   lost later. The bus logs loss/recovery once; requests fail with ErrBusDown meanwhile,
   which the master does not log
-- bus.go: FC04 read, FC10/FC06 write, broadcast without reply
+- bus.go: FC03/FC04 read, FC10/FC06 write, broadcast without reply
 - sensorbox.go: decode P1/CT, plausibility checks
+- evmeter.go: EMConfig port (all Modbus meter types usable as EV meter; not Sensorbox,
+  SolarEdge, API, HomeWizard, Custom), request frames and decoding (currents with sign
+  from phase power, power, energy) as meter.cpp
 - balancer.go: Smart-mode port of CalcBalancedCurrent / IsCurrentAvailable /
   processAllNodeStates + per-node external limit (Max) from evcc
 - master.go: 2 s cycle, node handles with evcc-shaped methods
-  (Status, Enabled, Enable, MaxCurrent, MaxCurrentMillis), Snapshot for an API
-- sim.go: simulated bus (Sensorbox + nodes), node behaviour ported from the
-  firmware state machine incl. STATUS_ERROR handling, ChargeDelay, COMM_TIMEOUT
-- scenario_test.go: 17 scenarios; soak_test.go: 20 seeds × 2 h random events
+  (Status, Enabled, Enable, MaxCurrent, MaxCurrentMillis), Snapshot for an API.
+  After the broadcast: one online node's EV meter per cycle, round robin (current,
+  energy, power if not in the current answer); readings in NodeInfo.Meter
+- sim.go: simulated bus (Sensorbox + nodes + an Eastron3P EV meter per node), node
+  behaviour ported from the firmware state machine incl. STATUS_ERROR handling,
+  ChargeDelay, COMM_TIMEOUT, EV meter listening and COMM_EVTIMEOUT
+- scenario_test.go: 20 scenarios; soak_test.go: 20 seeds × 2 h random events;
+  evmeter_test.go: request frames per type, decode vectors (incl. one from the real bus)
 
 Deliberate deviations from the firmware (all found by the simulator):
 1. Fresh-measurement flag is consumed by the first Calc of a cycle (firmware
@@ -62,6 +80,10 @@ Deliberate deviations from the firmware (all found by the simulator):
    one stale measurement → two simultaneous plug-ins each got full headroom (+12 A).
 5. A node evcc disabled is left waiting in COMM_B/COMM_C instead of rejected with
    LESS_6A → re-enable takes ~4 s instead of 64 s (node ChargeDelay).
+6. EV meter setting is also re-read when a node comes back online (it may have
+   restarted with other settings; firmware only reads it at master boot or on the flag).
+7. No separate power read for meters whose current answer holds the phase powers
+   (firmware checks the master's own EV meter type there, not the node's).
 
 Known, inherent (same as firmware): a sudden household load is corrected on the next
 measurement (≤ 1 cycle overload); a hard shortage stops all EVSEs after 3 cycles.
@@ -72,11 +94,11 @@ Done (`cmd/evse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
   -nodes, -stale, -ct200, -default-enabled (default false), -sim, -log-level), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
-- api.go: GET /api/state, GET /api/nodes/{id} (evcc jq .status / .enabled; status
-  "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
+- api.go: GET /api/state, GET /api/nodes/{id} (evcc jq .status / .enabled /
+  .meter.powerW / .meter.energyKWh; status "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
   POST /api/nodes/{id}/current?value= (float), GET /healthz (503 on stalled loop or
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
-  /api/sim/sensorbox?offline=, /api/sim/nodes/{id}?connected=&wants=&offline=&carmax=&phases=.
+  /api/sim/sensorbox?offline=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=.
 - Dockerfile: buildx multi-arch, CGO_ENABLED=0, distroless static nonroot (needs
   group_add with the tty device gid). examples/evcc.yaml uses Go templates in uri
   (`{{.enable}}`, `{{.maxcurrent}}`, `{{.maxcurrentmillis}}`) per docs.evcc.io
@@ -91,7 +113,10 @@ TODO:
    (nodes fail safe, but the daemon stays dead) → reconnect in transport or exit.
 3. Docker image build not yet tested (no docker on the dev machine).
 4. Hardware verification: node timing (does a real node behave like Sim?), what a
-   waiting node in COMM_C shows on its display, real car ramp rates.
+   waiting node in COMM_C shows on its display, real car ramp rates. EV meters: node
+   shows no EV_NOCOMM, node web UI / OCPP energy follows the meter, meter answer time
+   fits the bus timeout. The firmware master leaves 50 ms between frames; this bus
+   does not — check the nodes still pick up the meter answers.
 5. Later: port to evcc as `charger/smartevse-master.go` (one master, N chargers).
 
 ## Conventions

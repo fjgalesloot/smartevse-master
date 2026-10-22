@@ -431,3 +431,96 @@ func TestScenarioExport(t *testing.T) {
 	near(t, "node 1", h.amps(1), 13, 0.5) // 16 - (-10) = 26 A headroom, split
 	near(t, "node 2", h.amps(2), 13, 0.5)
 }
+
+// The master polls the nodes' EV meters, so the nodes hear the answers: no
+// EV_NOCOMM, and the energy each node reports (OCPP) follows its meter.
+func TestScenarioEVMeter(t *testing.T) {
+	h := newHarness(t)
+	h.plugIn(1)
+	h.plugIn(2)
+	for elapsed := time.Duration(0); elapsed < 10*time.Minute; elapsed += Interval {
+		h.run(Interval)
+		for id := 1; id <= 2; id++ {
+			if h.sim.Node(id).Err&ErrEVNoComm != 0 {
+				t.Fatalf("node %d EV_NOCOMM after %v\n%s", id, elapsed, h.dump())
+			}
+		}
+	}
+	for id := 1; id <= 2; id++ {
+		n := h.sim.Node(id)
+		if n.MeterKWh < 1000*float64(id)+0.5 {
+			t.Fatalf("node %d meter %.3f kWh: car did not charge", id, n.MeterKWh)
+		}
+		// polled every 2 nodes × 2 s, a car draws < 3 Wh/s
+		near(t, "energy heard by node "+itoa(id), n.HeardKWh, n.MeterKWh, 0.015)
+
+		mi := h.m.Node(id).Info().Meter
+		if mi == nil || !mi.Polled || !mi.Online || mi.Type != "Eastron3P" || mi.Address != 16+id {
+			t.Fatalf("node %d meter info %+v", id, mi)
+		}
+		near(t, "energy read by master "+itoa(id), mi.EnergyKWh, n.MeterKWh, 0.015)
+		draw := n.EVCurrent()
+		near(t, "power "+itoa(id), float64(mi.PowerW), draw*3*230, 1)
+		for p := range mi.CurrentsA {
+			near(t, "current "+itoa(id), mi.CurrentsA[p], draw, 0.1)
+		}
+		if mi.Age > 2*Interval.Seconds() {
+			t.Errorf("node %d meter reading %.0f s old", id, mi.Age)
+		}
+	}
+}
+
+// An EV meter stops answering: its node stops on EV_NOCOMM after COMM_EVTIMEOUT,
+// the other node is not affected. When the meter is back the node resumes.
+func TestScenarioEVMeterLost(t *testing.T) {
+	h := newHarness(t)
+	h.plugIn(1)
+	h.plugIn(2)
+	h.runUntil(20*time.Second, "both charging", func() bool { return h.charging(1)() && h.charging(2)() })
+
+	h.sim.Node(1).MeterOffline = true
+	took := h.runUntil(COMMEVTimeout*time.Second+10*time.Second, "node 1 stopped",
+		func() bool { return h.amps(1) == 0 && h.sim.Node(1).Err&ErrEVNoComm != 0 })
+	t.Logf("node 1 stopped %v after its meter was lost", took)
+	if mi := h.m.Node(1).Info().Meter; mi.Online {
+		t.Errorf("master reports lost meter online")
+	}
+	if !h.charging(2)() || h.sim.Node(2).Err != 0 {
+		t.Errorf("node 2 affected: state %s err %d", StateName(h.state(2)), h.sim.Node(2).Err)
+	}
+
+	h.sim.Node(1).MeterOffline = false
+	h.runUntil(90*time.Second, "node 1 resumed", h.charging(1))
+}
+
+// The EV meter setting changes on a node (new address, settings saved): the
+// node flags it, the master re-reads it, clears the flag and polls the new address.
+func TestScenarioEVMeterReconfigured(t *testing.T) {
+	h := newHarness(t)
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
+
+	n := h.sim.Node(1)
+	n.MeterAddr, n.CfgChanged = 30, true
+	h.run(3 * Interval)
+	if n.CfgChanged {
+		t.Errorf("config flag not cleared")
+	}
+	if mi := h.m.Node(1).Info().Meter; mi.Address != 30 || !mi.Online {
+		t.Errorf("meter info %+v, want address 30 online", mi)
+	}
+	h.run(2 * time.Minute)
+	if !h.charging(1)() || n.Err != 0 {
+		t.Errorf("node 1 not charging after reconfiguration: state %s err %d", StateName(n.State), n.Err)
+	}
+
+	// meter disabled on the node: nothing to poll, the node does not time out
+	n.MeterType, n.CfgChanged = MeterDisabled, true
+	h.run(2 * time.Minute)
+	if mi := h.m.Node(1).Info().Meter; mi != nil {
+		t.Errorf("meter info %+v for a node without meter", mi)
+	}
+	if !h.charging(1)() {
+		t.Errorf("node 1 stopped without EV meter")
+	}
+}
