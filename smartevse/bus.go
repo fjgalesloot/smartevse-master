@@ -129,37 +129,49 @@ func (b *Bus) transact(frame []byte, expect int) ([]byte, error) {
 		return nil, b.reset(err)
 	}
 
-	deadline := time.Now().Add(frameTime(len(frame)) + b.Timeout)
+	sent := time.Now()
+	deadline := sent.Add(frameTime(len(frame)) + b.Timeout)
 	buf := make([]byte, 0, expect)
 	tmp := make([]byte, 256)
+	var first time.Duration // until the first answer byte, for diagnostics
 	for len(buf) < expect {
 		if err := b.t.SetReadDeadline(deadline); err != nil {
 			return nil, b.reset(err)
 		}
 		n, err := b.t.Read(tmp)
+		if n > 0 && len(buf) == 0 {
+			first = time.Since(sent)
+		}
 		buf = append(buf, tmp[:n]...)
 		// exception response is 5 bytes: addr, fc|0x80, code, crc
 		if len(buf) >= 5 && buf[1]&0x80 != 0 {
 			if crc16(buf[:3]) != binary.LittleEndian.Uint16(buf[3:5]) {
-				return nil, fmt.Errorf("addr %d: crc error in exception", frame[0])
+				return nil, fmt.Errorf("addr %d: crc error in exception%s", frame[0], rxInfo(buf, first))
 			}
 			return nil, fmt.Errorf("addr %d: %w %d", frame[0], ErrException, buf[2])
 		}
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) || isTimeout(err) {
-				return nil, fmt.Errorf("addr %d: timeout (%d/%d bytes)", frame[0], len(buf), expect)
+				return nil, fmt.Errorf("addr %d: timeout (%d/%d bytes)%s", frame[0], len(buf), expect, rxInfo(buf, first))
 			}
 			return nil, b.reset(err)
 		}
 	}
-	buf = buf[:expect]
 	if buf[0] != frame[0] {
-		return nil, fmt.Errorf("addr %d: answer from %d", frame[0], buf[0])
+		return nil, fmt.Errorf("addr %d: answer from %d%s", frame[0], buf[0], rxInfo(buf, first))
 	}
-	if crc16(buf[:expect-2]) != binary.LittleEndian.Uint16(buf[expect-2:]) {
-		return nil, fmt.Errorf("addr %d: crc error", frame[0])
+	if crc16(buf[:expect-2]) != binary.LittleEndian.Uint16(buf[expect-2:expect]) {
+		return nil, fmt.Errorf("addr %d: crc error%s", frame[0], rxInfo(buf, first))
 	}
-	return buf, nil
+	return buf[:expect], nil
+}
+
+// rxInfo describes what arrived for a failed request: latency and raw bytes.
+func rxInfo(buf []byte, first time.Duration) string {
+	if len(buf) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" [first byte after %d ms, rx % x]", first.Milliseconds(), buf)
 }
 
 // connect (re)opens the transport, with exponential backoff between attempts.

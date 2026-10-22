@@ -39,6 +39,7 @@ func run() error {
 		ct200          = flag.Bool("ct200", false, "Sensorbox CTs are 200A:50mA")
 		defaultEnabled = flag.Bool("default-enabled", false, "nodes may charge before evcc enabled them")
 		simulate       = flag.Bool("sim", false, "run against a simulated bus in real time (no hardware)")
+		sniff          = flag.Bool("sniff", false, "only listen on -port and print all traffic, never transmit (diagnostics)")
 		logLevel       = flag.String("log-level", "info", "debug, info, warn or error")
 	)
 	flag.Parse()
@@ -65,6 +66,10 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *sniff {
+		return sniffBus(ctx, *port)
+	}
 
 	var (
 		bus *smartevse.Bus

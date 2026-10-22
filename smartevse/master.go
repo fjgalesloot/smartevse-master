@@ -207,6 +207,9 @@ func (m *Master) Cycle() {
 	}
 
 	// 6. broadcast currents + mains
+	if m.log.Enabled(context.Background(), slog.LevelDebug) {
+		m.logCycle(imeas, fresh)
+	}
 	vals := make([]uint16, 0, broadcastLoadRegs)
 	for _, b := range m.bal.Balanced {
 		vals = append(vals, uint16(b))
@@ -217,6 +220,19 @@ func (m *Master) Cycle() {
 	if err := m.bus.WriteMultiple(BroadcastAddr, regBroadcastLoad, vals); err != nil {
 		m.warn("broadcast failed", err)
 	}
+}
+
+// logCycle logs the mains measurement (A) and the current (A) broadcast to each node.
+func (m *Master) logCycle(imeas int, fresh bool) {
+	args := []any{
+		"source", m.mains.Source, "fresh", fresh,
+		"l1", float64(m.mains.L[0]) / 10, "l2", float64(m.mains.L[1]) / 10, "l3", float64(m.mains.L[2]) / 10,
+		"imeasured", float64(imeas) / 10,
+	}
+	for _, n := range m.sortedNodes() {
+		args = append(args, fmt.Sprintf("node%d", n.id), float64(m.bal.Balanced[n.slot()])/10)
+	}
+	m.log.Debug("cycle", args...)
 }
 
 // warn logs a failed bus request; a lost bus is logged once by the bus itself.
