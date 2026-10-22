@@ -34,7 +34,12 @@ stays enforced outside evcc. Goal: later port `smartevse/` into evcc as a charge
 
 Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
 - protocol.go: constants, CRC (verified against firmware test vectors)
-- transport.go / serial_linux.go: serial (raw termios) and tcp:// (transparent gateway)
+- transport.go / serial_linux.go: `NewBusURI` for serial (raw termios) and tcp://
+  (transparent gateway / ser2net raw, NOT Modbus TCP: mbusd etc. wait for an answer to
+  the address-9 broadcast); opens on first use and reconnects after I/O errors with
+  backoff 1 s doubling to 30 s, so a device missing at startup is handled like one
+  lost later. The bus logs loss/recovery once; requests fail with ErrBusDown meanwhile,
+  which the master does not log
 - bus.go: FC04 read, FC10/FC06 write, broadcast without reply
 - sensorbox.go: decode P1/CT, plausibility checks
 - balancer.go: Smart-mode port of CalcBalancedCurrent / IsCurrentAvailable /

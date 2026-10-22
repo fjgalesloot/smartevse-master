@@ -4,9 +4,21 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
+)
+
+// retryMax caps the reconnect backoff.
+const retryMax = 30 * time.Second
+
+type busState int
+
+const (
+	busNew busState = iota
+	busUp
+	busDown
 )
 
 // Bus is a minimal Modbus RTU master with exactly the functions the
@@ -17,18 +29,38 @@ type Bus struct {
 	Timeout time.Duration // response timeout, firmware uses 150 ms
 	// BroadcastGap is the pause after a broadcast so nodes can process it.
 	BroadcastGap time.Duration
+
+	open  func() (Transport, error) // reopens the transport after an I/O error, nil = no reconnect
+	name  string                    // port, for logging
+	log   *slog.Logger
+	state busState
+	last  time.Time     // last open attempt or loss
+	wait  time.Duration // current reconnect backoff, doubles from retry up to retryMax
+	retry time.Duration // first reconnect backoff
 }
 
-// NewBus wraps a transport.
+// NewBus wraps a transport without reconnect (simulator, tests).
 func NewBus(t Transport) *Bus {
 	return &Bus{t: t, Timeout: 250 * time.Millisecond, BroadcastGap: 20 * time.Millisecond}
 }
 
 // Close closes the underlying transport.
-func (b *Bus) Close() error { return b.t.Close() }
+func (b *Bus) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.open = nil
+	if b.t == nil {
+		return nil
+	}
+	return b.t.Close()
+}
 
 // ErrException is returned when a device answers with a Modbus exception.
 var ErrException = errors.New("modbus exception")
+
+// ErrBusDown is returned while the transport is lost and being reopened. The bus
+// logs the loss and recovery itself, so callers need not log these errors.
+var ErrBusDown = errors.New("bus not connected")
 
 // ReadInput reads count input registers (function 0x04) and returns the raw data bytes.
 func (b *Bus) ReadInput(addr byte, reg, count uint16) ([]byte, error) {
@@ -69,22 +101,32 @@ func (b *Bus) WriteSingle(addr byte, reg, value uint16) error {
 func (b *Bus) send(frame []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if err := b.connect(); err != nil {
+		return err
+	}
+	defer b.checkUp()
 	b.drain()
-	_, err := b.t.Write(frame)
+	if _, err := b.t.Write(frame); err != nil {
+		return b.reset(err)
+	}
 	// nobody answers a broadcast: wait for the frame to leave the bus plus a gap
 	if b.BroadcastGap > 0 {
 		time.Sleep(frameTime(len(frame)) + b.BroadcastGap)
 	}
-	return err
+	return nil
 }
 
 func (b *Bus) transact(frame []byte, expect int) ([]byte, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if err := b.connect(); err != nil {
+		return nil, err
+	}
+	defer b.checkUp()
 
 	b.drain()
 	if _, err := b.t.Write(frame); err != nil {
-		return nil, err
+		return nil, b.reset(err)
 	}
 
 	deadline := time.Now().Add(frameTime(len(frame)) + b.Timeout)
@@ -92,7 +134,7 @@ func (b *Bus) transact(frame []byte, expect int) ([]byte, error) {
 	tmp := make([]byte, 256)
 	for len(buf) < expect {
 		if err := b.t.SetReadDeadline(deadline); err != nil {
-			return nil, err
+			return nil, b.reset(err)
 		}
 		n, err := b.t.Read(tmp)
 		buf = append(buf, tmp[:n]...)
@@ -107,7 +149,7 @@ func (b *Bus) transact(frame []byte, expect int) ([]byte, error) {
 			if errors.Is(err, os.ErrDeadlineExceeded) || isTimeout(err) {
 				return nil, fmt.Errorf("addr %d: timeout (%d/%d bytes)", frame[0], len(buf), expect)
 			}
-			return nil, err
+			return nil, b.reset(err)
 		}
 	}
 	buf = buf[:expect]
@@ -118,6 +160,66 @@ func (b *Bus) transact(frame []byte, expect int) ([]byte, error) {
 		return nil, fmt.Errorf("addr %d: crc error", frame[0])
 	}
 	return buf, nil
+}
+
+// connect (re)opens the transport, with exponential backoff between attempts.
+func (b *Bus) connect() error {
+	if b.t != nil {
+		return nil
+	}
+	if b.open == nil {
+		return fmt.Errorf("%w: closed", ErrBusDown)
+	}
+	if time.Since(b.last) < b.wait {
+		return ErrBusDown
+	}
+	b.last = time.Now()
+	t, err := b.open()
+	if err != nil {
+		b.backoff()
+		if b.state != busDown {
+			b.state = busDown
+			b.log.Error("bus not available, retrying", "port", b.name, "err", err)
+		} else {
+			b.log.Debug("bus reconnect failed", "port", b.name, "err", err, "next", b.wait)
+		}
+		return fmt.Errorf("%w: %w", ErrBusDown, err)
+	}
+	b.t = t
+	return nil
+}
+
+// reset drops a broken transport so a later request reopens it, and returns err
+// marked as ErrBusDown. Without reconnect it returns err unchanged.
+func (b *Bus) reset(err error) error {
+	if b.open == nil || b.t == nil {
+		return err
+	}
+	_ = b.t.Close()
+	b.t = nil
+	b.last = time.Now()
+	b.backoff()
+	if b.state == busUp {
+		b.log.Error("bus lost, reconnecting", "port", b.name, "err", err)
+	} else {
+		b.log.Debug("bus lost again", "port", b.name, "err", err)
+	}
+	b.state = busDown
+	return fmt.Errorf("%w: %w", ErrBusDown, err)
+}
+
+// checkUp marks the bus working once a request completed without dropping the
+// transport; a device that does not answer is not a bus problem.
+func (b *Bus) checkUp() {
+	if b.open == nil || b.t == nil || b.state == busUp {
+		return
+	}
+	b.state, b.wait = busUp, 0
+	b.log.Info("bus connected", "port", b.name, "timeout", b.Timeout)
+}
+
+func (b *Bus) backoff() {
+	b.wait = min(max(2*b.wait, b.retry), retryMax)
 }
 
 // drain discards stale bytes left on the bus.

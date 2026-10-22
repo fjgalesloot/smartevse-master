@@ -2,6 +2,7 @@ package smartevse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -136,7 +137,7 @@ func (m *Master) Cycle() {
 	if fresh {
 		m.mains, m.mainsAt = mains, now
 	} else {
-		m.log.Warn("sensorbox read failed", "err", err)
+		m.warn("sensorbox read failed", err)
 	}
 	wasFault := m.fault
 	m.fault = m.mainsAt.IsZero() || now.Sub(m.mainsAt) > m.cfg.Stale
@@ -184,7 +185,7 @@ func (m *Master) Cycle() {
 		}
 		m.log.Debug("node update", "node", n.id, "state", StateName(n.state), "write", vals)
 		if err := m.bus.WriteMultiple(n.addr, regNodeStatus, vals); err != nil {
-			m.log.Warn("node write failed", "node", n.id, "err", err)
+			m.warn("node write failed", err, "node", n.id)
 		}
 	}
 
@@ -201,7 +202,7 @@ func (m *Master) Cycle() {
 	if m.bal.Shortage() || imeas > m.cfg.MaxMains*20 {
 		m.log.Warn("not enough current: stopping all nodes", "imeasured", imeas)
 		if err := m.bus.WriteSingle(BroadcastAddr, regNodeError, ErrLess6A); err != nil {
-			m.log.Warn("broadcast error failed", "err", err)
+			m.warn("broadcast error failed", err)
 		}
 	}
 
@@ -214,8 +215,16 @@ func (m *Master) Cycle() {
 		vals = append(vals, uint16(int16(l)))
 	}
 	if err := m.bus.WriteMultiple(BroadcastAddr, regBroadcastLoad, vals); err != nil {
-		m.log.Warn("broadcast failed", "err", err)
+		m.warn("broadcast failed", err)
 	}
+}
+
+// warn logs a failed bus request; a lost bus is logged once by the bus itself.
+func (m *Master) warn(msg string, err error, args ...any) {
+	if errors.Is(err, ErrBusDown) {
+		return
+	}
+	m.log.Warn(msg, append(args, "err", err)...)
 }
 
 func (m *Master) allowed(n *node) bool {

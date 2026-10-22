@@ -29,6 +29,7 @@ func main() {
 func run() error {
 	var (
 		port           = flag.String("port", "/dev/ttyUSB0", "RS485 bus: serial device, or tcp://host:port for a transparent gateway")
+		timeout        = flag.Duration("timeout", 0, "bus response timeout, 0 = default for the port type (serial 250ms, tcp 500ms)")
 		listen         = flag.String("listen", ":7090", "HTTP API listen address")
 		maxMains       = flag.Int("max-mains", 0, "max mains current per phase in A (required)")
 		maxCircuit     = flag.Int("max-circuit", 0, "max current per phase for all EVSEs together in A, 0 = disabled")
@@ -81,12 +82,11 @@ func run() error {
 		go advanceSim(ctx, sim)
 		log.Info("running against simulated bus", "nodes", ids)
 	} else {
-		t, err := smartevse.Open(*port)
-		if err != nil {
-			return err
+		// opened by the first cycle, which logs "bus connected" or "bus not available"
+		bus = smartevse.NewBusURI(*port, log)
+		if *timeout > 0 {
+			bus.Timeout = *timeout
 		}
-		bus = smartevse.NewBus(t)
-		log.Info("bus opened", "port", *port)
 	}
 	defer bus.Close()
 
