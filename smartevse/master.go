@@ -22,7 +22,7 @@ type Config struct {
 	MaxCircuit     int           // A, 0 = disabled
 	MinCurrent     int           // A, default 6
 	Nodes          []NodeConfig  //
-	Stale          time.Duration // mains data older than this = fault; default 6 s
+	Stale          time.Duration // mains data older than this = fault; default 11 s (firmware COMM_TIMEOUT)
 	CT200A         bool          // Sensorbox CTs are 200A:50mA
 	DefaultEnabled bool          // nodes may charge before evcc sent anything
 }
@@ -39,6 +39,7 @@ type node struct {
 	err     int
 	mode    int
 	maxA    int // reported by node (reg 0x0007)
+	access  int // reg 0x0005, as read or last written
 	enabled bool
 	limit   int // 0.1 A, from evcc
 
@@ -85,7 +86,7 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 		cfg.MinCurrent = 6
 	}
 	if cfg.Stale == 0 {
-		cfg.Stale = 6 * time.Second
+		cfg.Stale = 11 * time.Second
 	}
 	if cfg.MaxMains < cfg.MinCurrent {
 		return nil, fmt.Errorf("max mains %d A below min current %d A", cfg.MaxMains, cfg.MinCurrent)
@@ -191,7 +192,7 @@ func (m *Master) control() {
 			n.cfgChanged = true // may have restarted with other settings
 		}
 		n.online = 5
-		n.state, n.err, n.mode, n.maxA = int(data[1]), int(data[3]), int(data[7]), int(data[15])
+		n.state, n.err, n.mode, n.access, n.maxA = int(data[1]), int(data[3]), int(data[7]), int(data[11]), int(data[15])
 		if data[13] != 0 {
 			n.cfgChanged = true
 		}
@@ -199,14 +200,17 @@ func (m *Master) control() {
 		m.bal.Max[n.slot()] = m.effectiveMax(n)
 	}
 
-	// 3. handshake
+	// 3. pause or resume nodes for evcc
+	m.syncAccess()
+
+	// 4. handshake
 	m.bal.PhasesUpdated = fresh
 	m.bal.StartedThisCycle = false
 	for _, n := range m.sortedNodes() {
 		if n.online == 0 {
 			continue
 		}
-		vals := m.bal.NodeUpdate(n.slot(), n.err, n.mode, imeas, m.allowed(n), m.fault)
+		vals := m.bal.NodeUpdate(n.slot(), n.err, n.mode, imeas, m.allowed(n), n.access == AccessPause, m.fault)
 		if vals == nil {
 			continue
 		}
@@ -216,7 +220,7 @@ func (m *Master) control() {
 		}
 	}
 
-	// 4. no valid mains: stop broadcasting, nodes stop on CT_NOCOMM (as firmware)
+	// 5. no valid mains: stop broadcasting, nodes stop on CT_NOCOMM (as firmware)
 	if m.fault {
 		for i := range m.bal.Balanced {
 			m.bal.Balanced[i] = 0
@@ -224,7 +228,7 @@ func (m *Master) control() {
 		return
 	}
 
-	// 5. balance
+	// 6. balance
 	m.bal.Calc(imeas, false)
 	if m.bal.Shortage() || imeas > m.cfg.MaxMains*20 {
 		m.log.Warn("not enough current: stopping all nodes", "imeasured", imeas)
@@ -233,7 +237,7 @@ func (m *Master) control() {
 		}
 	}
 
-	// 6. broadcast currents + mains
+	// 7. broadcast currents + mains
 	if m.log.Enabled(context.Background(), slog.LevelDebug) {
 		m.logCycle(imeas, fresh)
 	}
@@ -268,6 +272,36 @@ func (m *Master) warn(msg string, err error, args ...any) {
 		return
 	}
 	m.log.Warn(msg, append(args, "err", err)...)
+}
+
+// syncAccess pauses a node evcc does not allow to charge through the node's
+// own access register: the node stops a charging car by itself, does not ask
+// to charge again, and its display, web UI and MQTT show "Pause". evcc wins: a
+// change made on the node (button, web UI, MQTT) is undone in the next cycle.
+//
+// A node without a car (state A) is set to ON: a paused node in A ignores a car
+// being plugged in, so evcc would never see it connect. Plugging in then makes
+// it ask to charge (COMM_B), and it is paused in the same cycle.
+func (m *Master) syncAccess() {
+	for _, n := range m.sortedNodes() {
+		if n.online == 0 {
+			continue
+		}
+		want := AccessOn
+		if !m.allowed(n) && n.state != StateA {
+			want = AccessPause
+		}
+		if n.access == want {
+			continue
+		}
+		// the node answers after it has applied the new value
+		if err := m.bus.WriteSingle(n.addr, regNodeAccess, uint16(want)); err != nil {
+			m.warn("node access write failed", err, "node", n.id)
+			continue
+		}
+		m.log.Info("node access set", "node", n.id, "from", AccessName(n.access), "to", AccessName(want))
+		n.access = want
+	}
 }
 
 // pollEVMeter reads the EV meter of one online node per cycle, round robin, as
@@ -489,6 +523,7 @@ type NodeInfo struct {
 	State    string     `json:"state"`
 	Status   string     `json:"status"`
 	Errors   int        `json:"errors"`
+	Access   string     `json:"access"` // on, pause or off (node access register)
 	Enabled  bool       `json:"enabled"`
 	LimitA   float64    `json:"limitA"`
 	MaxA     float64    `json:"maxA"`     // effective cap
@@ -562,7 +597,7 @@ func (m *Master) nodeInfo(n *node) NodeInfo {
 	}
 	return NodeInfo{
 		ID: n.id, Online: n.online > 0, State: StateName(n.state), Status: status, Errors: n.err,
-		Enabled: n.enabled, LimitA: float64(n.limit) / 10,
+		Access: AccessName(n.access), Enabled: n.enabled, LimitA: float64(n.limit) / 10,
 		MaxA:     float64(m.effectiveMax(n)) / 10,
 		CurrentA: float64(m.bal.Balanced[n.slot()]) / 10,
 		Meter:    m.meterInfo(n),

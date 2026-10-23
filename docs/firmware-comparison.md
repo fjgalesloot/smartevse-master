@@ -26,19 +26,22 @@ Every 2 s:
 2. **Poll nodes.** Each node's cap `Max[n]` is the lowest of the node's
    reported max (reg 0x0007), the `-nodes` hard cap and the evcc limit. It is 0
    when evcc has disabled the node or set a limit below MinCurrent.
-3. **Handshake.** Requests from nodes waiting to start (COMM_B, COMM_C) are
+3. **Pause.** A node with a car that evcc does not allow to charge is paused
+   through its access register; all others are set to ON (see
+   [Stopping a car](#ramping-down-and-stopping-a-car-off)).
+4. **Handshake.** Requests from nodes waiting to start (COMM_B, COMM_C) are
    answered (see [Starting a car](#starting-a-car-on)).
-4. **Budget** (`iset`, the firmware's `IsetBalanced`) for all charging EVSEs
+5. **Budget** (`iset`, the firmware's `IsetBalanced`) for all charging EVSEs
    together. With `idiff = MaxMains − Imeasured`, on each fresh measurement:
    - if `idiff > 0`: `iset += idiff / 4`, so the budget goes up slowly;
    - otherwise `iset += idiff`, so the budget drops by the full overshoot at once.
 
    The budget is then clamped to `MaxMains − baseload`, to `MaxCircuit`, and
    to the sum of the active caps.
-5. **Split.** Any EVSE whose cap is below the average gets its cap; the rest is
+6. **Split.** Any EVSE whose cap is below the average gets its cap; the rest is
    shared evenly. With one car, it gets `min(iset, cap)`.
-6. **`limitIncreases`** (repo only): see [Differences](#differences-when-ramping-up-or-starting).
-7. **Broadcast** the currents and the mains readings to the nodes.
+7. **`limitIncreases`** (repo only): see [Differences](#differences-when-ramping-up-or-starting).
+8. **Broadcast** the currents and the mains readings to the nodes.
 
 The evcc limit is a **ceiling, not a setpoint**. A car gets up to its cap and
 only gets less when the mains measurement leaves less room. When cars compete,
@@ -85,7 +88,7 @@ The ramp maths matches the firmware line for line.
 | A car starts in a cycle where the Sensorbox reading failed | Nothing is shared out (main.cpp:1044 requires the fresh flag), so the new node is sent 0 A, goes to C1 (modbus.cpp:533) and stops. | Shares out anyway; all limits have already been applied. | Firmware bug: the start is lost. |
 | Two cars ask to start in the same cycle | Each is approved against the same reading, taken before either started, so each gets the full headroom (+12 A in the simulator). | One start per cycle (`StartedThisCycle`); the second waits for a reading that includes the first. | Overload. |
 | How much a node may go up | No limit. Current is moved between nodes in the same broadcast; a node that misses it keeps its old current (+5 A for ~10 s in the simulator). | `limitIncreases`: at most the measured headroom plus decreases of nodes that answered their last poll. A node that didn't answer is never raised. A new car always gets at least MinCurrent. | Overload on bus errors. |
-| A car disabled by evcc | No such concept: every node in state C is active. Nodes have no external limit. | Excluded from the active count and given 0 A. A disabled node that is waiting is left in COMM_B/COMM_C instead of being sent `LESS_6A`. | Re-enabling takes ~4 s instead of 64 s. |
+| A car disabled by evcc | No such concept: every node in state C is active. Nodes have no external limit. | Excluded from the active count, given 0 A and paused (see below). A disabled node that asks to charge is paused instead of being sent `LESS_6A`. | Re-enabling takes ~6 s instead of 64 s. |
 
 In normal operation `limitIncreases` never binds: the ¼ step is always smaller
 than the measured headroom. It only matters when a node misses polls, or when
@@ -99,15 +102,34 @@ current moves from one car to another.
   while sharing out, which needs a fresh reading, so a lower limit was ignored
   while the Sensorbox missed a reading. Here a lowered evcc limit takes effect
   within one cycle (≤ 2 s).
-- **evcc disables a car** (or sets its limit below MinCurrent): the car is sent
-  0 A and goes to C1. To restart, it goes through the handshake again
-  (C1 → B1 → COMM_B → … → C).
+- **evcc disables a car** (or sets its limit below MinCurrent): the master
+  pauses the node by writing PAUSE to its access register 0x0005
+  (`setAccess`, main.cpp:737). The node is also sent 0 A.
+  - **What the node does when paused:** it stops by itself (C → C1, B → B1),
+    does not ask to charge again, since every request needs access ON
+    (main.cpp:2397, 2428, 2448), and its display, web UI and MQTT show "Pause".
+  - **A node waiting for an answer** (COMM_B, COMM_C) is not moved by
+    `setAccess`, so once its pause is confirmed the master writes state B1 to it.
+  - **A node without a car (state A) stays ON.** A paused node in A ignores a
+    car being plugged in, so evcc would never see the car connect and never
+    enable the node. When a car is plugged in, the node asks to charge (COMM_B)
+    and is paused in the same cycle; evcc sees status B.
+  - **evcc wins:** a change made on the node (button, web UI, MQTT) is undone in
+    the next cycle.
+  - **Re-enabling:** the master writes ON; the node goes B1 → COMM_B → … → C, about 6 s.
+  - **The setting is stored on the node**, so a node stays paused if evse-master
+    stops; it then needs the button or web UI to charge on its own.
 - **Mains measurement lost:** the master writes `CT_NOCOMM` to the nodes and stops
   broadcasting, as in the firmware. It approves nothing during the fault, whereas
-  the firmware's `IsCurrentAvailable` ignores the fault. Timeout: 6 s here
-  (`-stale`), 11 s in the firmware (`COMM_TIMEOUT`, main.cpp:1421). On recovery
-  this master clears `CT_NOCOMM` on the nodes itself; the firmware leaves that to
-  the node's own timeout.
+  the firmware's `IsCurrentAvailable` ignores the fault. Timeout: 11 s
+  (`-stale`), the same as the firmware's `COMM_TIMEOUT` (main.cpp:1421).
+  - **Why not shorter:** writing `CT_NOCOMM` also starts the node's 60 s
+    `CHARGEDELAY` (main.cpp:2677–2679), so a shorter timeout turns a brief
+    Sensorbox gap into a stop of over a minute.
+  - **The cost:** until the timeout, currents are held but not raised, so a
+    household load change in that window goes unseen until the nodes stop.
+  - **On recovery** this master clears `CT_NOCOMM` on the nodes itself; the
+    firmware leaves that to the node's own timeout.
 - **Master dead:** each node stops by itself after ~11 s without a broadcast.
 
 ## Firmware master features that are not ported

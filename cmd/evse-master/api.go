@@ -127,6 +127,7 @@ type simNodeInfo struct {
 	Phases    int     `json:"phases"`
 	State     string  `json:"state"`
 	Errors    int     `json:"errors"`
+	Access    string  `json:"access"`
 	PWMA      float64 `json:"pwmA"`
 	DrawA     float64 `json:"drawA"`
 
@@ -159,7 +160,7 @@ func (a *api) simInfo() simInfo {
 			s.Nodes = append(s.Nodes, simNodeInfo{
 				ID: id, Offline: n.Offline, Connected: n.Connected, Wants: n.Wants,
 				CarMaxA: n.CarMaxA, Phases: n.Phases, State: smartevse.StateName(n.State),
-				Errors: n.Err, PWMA: float64(n.PWM) / 10, DrawA: n.EVCurrent(),
+				Errors: n.Err, Access: smartevse.AccessName(n.Access), PWMA: float64(n.PWM) / 10, DrawA: n.EVCurrent(),
 				MeterAddress: n.MeterAddr, MeterOffline: n.MeterOffline, MeterKWh: n.MeterKWh, HeardKWh: n.HeardKWh,
 			})
 		}
@@ -201,7 +202,7 @@ func (a *api) simSensorbox(w http.ResponseWriter, r *http.Request) {
 
 // simNode changes the car or bus connection of a simulated node. All
 // parameters are optional: connected, wants, offline, meteroffline (bool),
-// carmax (A), phases.
+// carmax (A), phases, access (on, pause or off: as if changed on the node).
 func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil || a.sim.Node(id) == nil {
@@ -213,6 +214,7 @@ func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 		bools  = map[string]*bool{}
 		carMax *float64
 		phases *int
+		access *int
 	)
 	for _, k := range []string{"connected", "wants", "offline", "meteroffline"} {
 		if !q.Has(k) {
@@ -241,6 +243,19 @@ func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 		}
 		phases = &v
 	}
+	if q.Has("access") {
+		v := -1
+		for _, a := range []int{smartevse.AccessOff, smartevse.AccessOn, smartevse.AccessPause} {
+			if q.Get("access") == smartevse.AccessName(a) {
+				v = a
+			}
+		}
+		if v < 0 {
+			http.Error(w, "access: want on, pause or off", http.StatusBadRequest)
+			return
+		}
+		access = &v
+	}
 
 	a.sim.Do(func() {
 		n := a.sim.Node(id)
@@ -261,6 +276,9 @@ func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 		}
 		if phases != nil {
 			n.Phases = *phases
+		}
+		if access != nil {
+			n.SetAccess(*access)
 		}
 	})
 	writeJSON(w, a.simInfo())

@@ -233,8 +233,9 @@ func (b *Balancer) Shortage() bool {
 //	err:       error register as read from the node
 //	mode:      mode register as read from the node
 //	allowed:   evcc allows this node to charge
+//	paused:    the node's access register is PAUSE (set by the master for evcc)
 //	fault:     mains measurement lost (CT_NOCOMM)
-func (b *Balancer) NodeUpdate(n, err, mode int, imeasured int, allowed, fault bool) []uint16 {
+func (b *Balancer) NodeUpdate(n, err, mode int, imeasured int, allowed, paused, fault bool) []uint16 {
 	available := !fault && b.Available(imeasured)
 	current := available && allowed
 	write := false
@@ -242,7 +243,7 @@ func (b *Balancer) NodeUpdate(n, err, mode int, imeasured int, allowed, fault bo
 	values := []uint16{uint16(state), 0}
 
 	// Clear LESS_6A once there is room again, also for a node evcc disabled:
-	// that node simply waits in COMM_B/COMM_C (below), without a ChargeDelay.
+	// that node is paused instead (below), without a ChargeDelay.
 	if available && err&ErrLess6A != 0 {
 		err &^= ErrLess6A
 		write = true
@@ -257,11 +258,20 @@ func (b *Balancer) NodeUpdate(n, err, mode int, imeasured int, allowed, fault bo
 	}
 
 	// Deviation from the firmware: a request from a node that evcc disabled is
-	// left unanswered instead of rejected with LESS_6A. The node keeps waiting
-	// in COMM_B/COMM_C without error, so enabling it again takes one cycle
-	// instead of the node's 60 s ChargeDelay.
-	switch state {
-	case StateCommB:
+	// not rejected with LESS_6A, which would cost a 60 s ChargeDelay once it is
+	// enabled again. Once the node is paused (its access register), it is sent
+	// back to B1: pausing alone does not move a node out of COMM_B/COMM_C, and a
+	// paused node stays in B1 until it is set to ON again. Until then (the
+	// access write failed) the request is left unanswered.
+	switch {
+	case (state == StateCommB || state == StateCommC) && !allowed:
+		b.Balanced[n] = 0
+		if paused {
+			b.State[n] = StateB1
+			values[0] = StateB1
+			write = true
+		}
+	case state == StateCommB:
 		if current {
 			b.State[n] = StateB
 			b.Balanced[n] = b.MinCurrent * 10
@@ -274,7 +284,7 @@ func (b *Balancer) NodeUpdate(n, err, mode int, imeasured int, allowed, fault bo
 				write = true
 			}
 		}
-	case StateCommC:
+	case state == StateCommC:
 		b.Balanced[n] = 0
 		if current && b.StartedThisCycle {
 			break // wait one cycle for a measurement that includes the other start

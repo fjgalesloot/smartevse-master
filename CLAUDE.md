@@ -24,7 +24,11 @@ stays enforced outside evcc. Goal: later port `smartevse/` into evcc as a charge
 
 - Node address = LoadBl (Node1 = 0x02, Node2 = 0x03); broadcast slot index = address - 1.
 - Poll node: FC04, reg 0x0000, 8 regs. state = byte 1, error = byte 3, mode = byte 7,
-  max A = byte 15.
+  access = byte 11, max A = byte 15.
+- Access: reg 0x0005, OFF=0 / ON=1 / PAUSE=2, FC06, stored on the node (NVS, ≤ 1 write
+  per 60 s). Only ON lets a node request (COMM_B/COMM_C). PAUSE/OFF stop a charging car
+  (C→C1, B→B1) but leave COMM_B/COMM_C as is, and a paused node in A ignores a car being
+  plugged in (stays A). Node display, web UI and MQTT show "Pause".
 - Handshake: state 4 (COMM_B) → write 5; state 6 (COMM_C) → write 7. FC10 to reg 0x0000
   with [state, error] (+ [current(ignored), mode] when correcting mode).
 - Every ~2 s broadcast FC10 to addr 0x09, reg 0x0020, 11 regs: 8 currents (0.1 A) +
@@ -61,10 +65,11 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
 - master.go: 2 s cycle, node handles with evcc-shaped methods
   (Status, Enabled, Enable, MaxCurrent, MaxCurrentMillis), Snapshot for an API.
   After the broadcast: one online node's EV meter per cycle, round robin (current,
-  energy, power if not in the current answer); readings in NodeInfo.Meter
+  energy, power if not in the current answer); readings in NodeInfo.Meter.
+  syncAccess: pauses nodes evcc disabled (access register), see deviation 5
 - sim.go: simulated bus (Sensorbox + nodes + an Eastron3P EV meter per node), node
   behaviour ported from the firmware state machine incl. STATUS_ERROR handling,
-  ChargeDelay, COMM_TIMEOUT, EV meter listening and COMM_EVTIMEOUT
+  ChargeDelay, COMM_TIMEOUT, access (setAccess), EV meter listening and COMM_EVTIMEOUT
 - scenario_test.go: 20 scenarios; soak_test.go: 20 seeds × 2 h random events;
   evmeter_test.go: request frames per type, decode vectors (incl. one from the real bus)
 
@@ -78,8 +83,11 @@ Deliberate deviations from the firmware (all found by the simulator):
    ignored while the Sensorbox missed a reading).
 4. Max one new EVSE start per cycle. Firmware approves all waiting nodes against
    one stale measurement → two simultaneous plug-ins each got full headroom (+12 A).
-5. A node evcc disabled is left waiting in COMM_B/COMM_C instead of rejected with
-   LESS_6A → re-enable takes ~4 s instead of 64 s (node ChargeDelay).
+5. A node evcc disabled is paused through its access register instead of rejected
+   with LESS_6A → re-enable takes ~6 s instead of 64 s (node ChargeDelay), and the
+   node shows "Pause". A waiting node (COMM_B/COMM_C) is sent to B1 once paused. evcc
+   wins: a change on the node is undone next cycle. A node in state A is kept ON, or
+   it would not notice a car and evcc would never see it connect.
 6. EV meter setting is also re-read when a node comes back online (it may have
    restarted with other settings; firmware only reads it at master boot or on the flag).
 7. No separate power read for meters whose current answer holds the phase powers
@@ -88,17 +96,20 @@ Deliberate deviations from the firmware (all found by the simulator):
 Known, inherent (same as firmware): a sudden household load is corrected on the next
 measurement (≤ 1 cycle overload); a hard shortage stops all EVSEs after 3 cycles.
 A car drawing less than its PWM leaves "phantom" headroom that another node may get;
-if that car then ramps up, the overload lasts ≤ 1 cycle.
+if that car then ramps up, the overload lasts ≤ 1 cycle. While the Sensorbox does not
+answer, currents are held (not raised) until -stale (default 11 s = COMM_TIMEOUT)
+stops all nodes; a household load change in that window goes unseen until then.
 
 Done (`cmd/evse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
-  -nodes, -stale, -ct200, -default-enabled (default false), -sim, -log-level), SIGTERM
+  -nodes, -stale (11 s), -ct200, -default-enabled (default false), -sim, -log-level), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
 - api.go: GET /api/state, GET /api/nodes/{id} (evcc jq .status / .enabled /
-  .meter.powerW / .meter.energyKWh; status "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
+  .meter.powerW / .meter.energyKWh; .access on/pause/off; status "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
   POST /api/nodes/{id}/current?value= (float), GET /healthz (503 on stalled loop or
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
-  /api/sim/sensorbox?offline=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=.
+  /api/sim/sensorbox?offline=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=&access=
+  (access=on|pause|off as if changed on the node).
 - Dockerfile: buildx multi-arch, CGO_ENABLED=0, distroless static nonroot (needs
   group_add with the tty device gid). examples/evcc.yaml uses Go templates in uri
   (`{{.enable}}`, `{{.maxcurrent}}`, `{{.maxcurrentmillis}}`) per docs.evcc.io
@@ -112,8 +123,9 @@ TODO:
 2. tcp:// transport does not reconnect after the gateway drops the connection
    (nodes fail safe, but the daemon stays dead) → reconnect in transport or exit.
 3. Docker image build not yet tested (no docker on the dev machine).
-4. Hardware verification: node timing (does a real node behave like Sim?), what a
-   waiting node in COMM_C shows on its display, real car ramp rates. EV meters: node
+4. Hardware verification: node timing (does a real node behave like Sim?), pause:
+   display shows PAUSE, a paused node written to B1 stays there, plug-in while
+   disabled is seen (A kept ON) and re-enable resumes; real car ramp rates. EV meters: node
    shows no EV_NOCOMM, node web UI / OCPP energy follows the meter, meter answer time
    fits the bus timeout. The firmware master leaves 50 ms between frames; this bus
    does not — check the nodes still pick up the meter answers.

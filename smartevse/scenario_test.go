@@ -263,9 +263,9 @@ func TestScenarioNoRoomAtPlugIn(t *testing.T) {
 	}
 }
 
-// evcc disables node 1: it stops within a cycle and node 2 gets more. The node
-// then waits in COMM_B without error, so enabling it again is quick (no 60 s
-// ChargeDelay, unlike the firmware's LESS_6A rejection).
+// evcc disables node 1: it is paused (access register), stops within a cycle
+// and node 2 gets more. The node waits in B1 without error, so enabling it
+// again is quick (no 60 s ChargeDelay, unlike the firmware's LESS_6A rejection).
 func TestScenarioDisableEnable(t *testing.T) {
 	h := newHarness(t)
 	h.plugIn(1)
@@ -280,13 +280,17 @@ func TestScenarioDisableEnable(t *testing.T) {
 	if s, _ := h.m.Node(1).Status(); s != "B" {
 		t.Errorf("disabled node status %q, want B", s)
 	}
-	if n := h.sim.Node(1); n.Err != 0 || n.ChargeDelay != 0 {
-		t.Errorf("disabled node should wait without error: err=%d delay=%d", n.Err, n.ChargeDelay)
+	if n := h.sim.Node(1); n.Err != 0 || n.ChargeDelay != 0 || n.Access != AccessPause || n.State != StateB1 {
+		t.Errorf("disabled node should be paused in B1 without error: state=%s access=%s err=%d delay=%d",
+			StateName(n.State), AccessName(n.Access), n.Err, n.ChargeDelay)
 	}
 
 	h.m.Node(1).Enable(true)
 	took := h.runUntil(20*time.Second, "node 1 resumed", h.charging(1))
 	t.Logf("node 1 resumed %v after enable", took)
+	if a := h.sim.Node(1).Access; a != AccessOn {
+		t.Errorf("enabled node access %s, want on", AccessName(a))
+	}
 	h.run(40 * time.Second)
 	near(t, "node 1 shared again", h.amps(1), 10, 0.5)
 	if h.peakOver > 0 {
@@ -294,18 +298,65 @@ func TestScenarioDisableEnable(t *testing.T) {
 	}
 }
 
-// Disabled before plugging in: the car waits, starts as soon as evcc enables.
+// Disabled before plugging in: a node without a car is not paused, or it would
+// not notice the car and evcc would never see it connect. Once plugged in it is
+// paused, evcc sees B, and the car starts as soon as evcc enables.
 func TestScenarioPlugInWhileDisabled(t *testing.T) {
 	h := newHarness(t)
 	h.m.Node(1).Enable(false)
+	h.run(10 * time.Second)
+	if a := h.sim.Node(1).Access; a != AccessOn {
+		t.Fatalf("disabled node without car: access %s, want on", AccessName(a))
+	}
+
 	h.plugIn(1)
 	h.run(30 * time.Second)
-	if h.amps(1) != 0 || h.sim.Node(1).Err != 0 {
-		t.Fatalf("disabled node: draw %.1f A, err %d", h.amps(1), h.sim.Node(1).Err)
+	n := h.sim.Node(1)
+	if h.amps(1) != 0 || n.Err != 0 || n.Access != AccessPause {
+		t.Fatalf("disabled node: draw %.1f A, err %d, access %s", h.amps(1), n.Err, AccessName(n.Access))
 	}
+	if s, _ := h.m.Node(1).Status(); s != "B" {
+		t.Errorf("disabled node with car: status %q, want B", s)
+	}
+
 	h.m.Node(1).Enable(true)
 	took := h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
 	t.Logf("node 1 started %v after enable", took)
+
+	// unplugged while disabled: back to ON, ready for the next car
+	h.m.Node(1).Enable(false)
+	h.run(10 * time.Second)
+	n.Connected, n.Wants = false, false
+	h.run(2 * Interval)
+	if n.State != StateA || n.Access != AccessOn {
+		t.Errorf("unplugged disabled node: state %s access %s, want A on", StateName(n.State), AccessName(n.Access))
+	}
+}
+
+// evcc wins over a change made on the node itself (button, web UI, MQTT).
+func TestScenarioAccessChangedOnNode(t *testing.T) {
+	h := newHarness(t)
+	h.plugIn(1)
+	h.runUntil(10*time.Second, "node 1 charging", h.charging(1))
+
+	// paused on the node while evcc allows charging: resumed
+	h.sim.Node(1).SetAccess(AccessPause)
+	took := h.runUntil(20*time.Second, "node 1 resumed", h.charging(1))
+	t.Logf("node 1 resumed %v after a pause on the node", took)
+
+	// switched on at the node while evcc has it disabled: paused again, no charging
+	h.m.Node(1).Enable(false)
+	h.run(10 * time.Second)
+	h.sim.Node(1).SetAccess(AccessOn)
+	for i := 0; i < 10; i++ {
+		h.run(Interval)
+		if h.amps(1) != 0 {
+			t.Fatalf("node 1 charges %.1f A while evcc has it disabled", h.amps(1))
+		}
+	}
+	if a := h.sim.Node(1).Access; a != AccessPause {
+		t.Errorf("node 1 access %s, want pause", AccessName(a))
+	}
 }
 
 // Sensorbox stops answering: after Stale the master flags CT_NOCOMM, stops
@@ -317,7 +368,7 @@ func TestScenarioSensorboxLost(t *testing.T) {
 	h.runUntil(20*time.Second, "both charging", func() bool { return h.charging(1)() && h.charging(2)() })
 
 	h.sim.SensorboxOffline = true
-	took := h.runUntil(12*time.Second, "both stopped", func() bool { return h.amps(1) == 0 && h.amps(2) == 0 })
+	took := h.runUntil(16*time.Second, "both stopped", func() bool { return h.amps(1) == 0 && h.amps(2) == 0 })
 	t.Logf("nodes stopped %v after sensorbox loss", took)
 	if !h.m.Snapshot().Fault {
 		t.Errorf("master should report fault")

@@ -33,6 +33,27 @@ const (
 	ErrRCD      = 16 // residual current detected
 )
 
+// Access register 0x0005 of a node (main.h AccessStatus_t). Only ON lets a
+// node ask the master to charge; PAUSE and OFF stop a charging car (setAccess).
+const (
+	AccessOff   = 0 // locked: RFID, access switch, delayed start
+	AccessOn    = 1
+	AccessPause = 2 // display, web UI and MQTT show "Pause"
+)
+
+// AccessName returns a readable name for an access register value.
+func AccessName(a int) string {
+	switch a {
+	case AccessOff:
+		return "off"
+	case AccessOn:
+		return "on"
+	case AccessPause:
+		return "pause"
+	}
+	return "unknown"
+}
+
 const (
 	// NrEVSEs is the number of slots in the balance broadcast (master + 7 nodes).
 	NrEVSEs = 8
@@ -48,6 +69,7 @@ const (
 
 	regNodeStatus     = 0x0000 // 8 input registers: state, error, current, mode, solartimer, access, cfgchanged, max
 	regNodeError      = 0x0001
+	regNodeAccess     = 0x0005 // AccessOff / AccessOn / AccessPause, stored on the node
 	regNodeCfgChanged = 0x0006 // set by the node when its settings were saved; the master clears it
 	regNodeEVMeter    = 0x0108 // 2 registers: EV meter type, EV meter address
 	regBroadcastLoad  = 0x0020 // 8 balance currents + 3 mains currents (0.1 A)

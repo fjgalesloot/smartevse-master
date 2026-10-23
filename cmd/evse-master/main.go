@@ -35,7 +35,7 @@ func run() error {
 		maxCircuit     = flag.Int("max-circuit", 0, "max current per phase for all EVSEs together in A, 0 = disabled")
 		minCurrent     = flag.Int("min-current", 6, "minimum charge current in A")
 		nodes          = flag.String("nodes", "1:16,2:16", "nodes as id:maxA, comma separated (id = Load Balancing setting 1..7)")
-		stale          = flag.Duration("stale", 6*time.Second, "mains data older than this stops all nodes")
+		stale          = flag.Duration("stale", 11*time.Second, "mains data older than this stops all nodes (firmware: 11s)")
 		ct200          = flag.Bool("ct200", false, "Sensorbox CTs are 200A:50mA")
 		defaultEnabled = flag.Bool("default-enabled", false, "nodes may charge before evcc enabled them")
 		simulate       = flag.Bool("sim", false, "run against a simulated bus in real time (no hardware)")

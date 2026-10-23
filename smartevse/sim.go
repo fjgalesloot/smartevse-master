@@ -62,6 +62,7 @@ type SimNode struct {
 	// firmware state
 	State       int
 	Err         int
+	Access      int     // reg 0x0005: AccessOff / AccessOn / AccessPause
 	ChargeDelay int     // seconds
 	Timeout     int     // seconds until CT_NOCOMM
 	EVTimeout   int     // seconds until EV_NOCOMM
@@ -89,7 +90,7 @@ func NewSim(ids ...int) *Sim {
 		s.Nodes[byte(id+1)] = &SimNode{
 			MaxA: 16, Mode: ModeSmart, CarMaxA: 16, Phases: 3,
 			MeterType: MeterEastron3P, MeterAddr: 16 + id, MeterKWh: 1000 * float64(id),
-			Timeout: COMMTimeout, EVTimeout: COMMTimeout, PWM: 60,
+			Timeout: COMMTimeout, EVTimeout: COMMTimeout, PWM: 60, Access: AccessOn,
 		}
 	}
 	return s
@@ -236,16 +237,19 @@ func (n *SimNode) tick1s() {
 	n.stateMachine()
 }
 
+// stateMachine runs the EVSE state machine. Every request to the master needs
+// access ON; a paused node in state A does not even notice a car (it stays in A).
 func (n *SimNode) stateMachine() {
 	p := n.pilot()
+	on := n.Access == AccessOn
 	switch n.State {
 	case StateA, StateCommB, StateB1:
 		if p == pilot12V {
 			n.State = StateA
 			n.ChargeDelay = 0
-		} else if p == pilot9V && n.Err == 0 && n.ChargeDelay == 0 && n.State != StateCommB {
+		} else if p == pilot9V && n.Err == 0 && n.ChargeDelay == 0 && on && n.State != StateCommB {
 			n.State = StateCommB // ask master
-		} else if p == pilot9V && n.State != StateB1 && n.State != StateCommB {
+		} else if p == pilot9V && n.State != StateB1 && n.State != StateCommB && on {
 			n.State = StateB1
 		}
 	case StateCommBOK:
@@ -253,7 +257,7 @@ func (n *SimNode) stateMachine() {
 	case StateB, StateCommC:
 		if p == pilot12V {
 			n.State = StateA
-		} else if p == pilot6V && n.Err == 0 && n.ChargeDelay == 0 {
+		} else if p == pilot6V && n.Err == 0 && n.ChargeDelay == 0 && on {
 			n.State = StateCommC // ask master
 		}
 	case StateC1:
@@ -279,6 +283,31 @@ func (n *SimNode) setCurrent(v int) {
 		v = 60
 	}
 	n.PWM = v
+}
+
+// setState mirrors the part of setState() the master can observe: entering B1
+// holds the node there for at least 3 s (ChargeDelay).
+func (n *SimNode) setState(s int) {
+	if s == StateB1 && n.ChargeDelay == 0 {
+		n.ChargeDelay = 3
+	}
+	n.State = s
+}
+
+// SetAccess mirrors setAccess(), called for a write of register 0x0005 or a
+// change on the node itself (button, web UI, MQTT). PAUSE and OFF stop a
+// charging car. A node waiting for the master (COMM_B, COMM_C) is left where it is.
+func (n *SimNode) SetAccess(a int) {
+	n.Access = a
+	if a == AccessOn {
+		return
+	}
+	switch n.State {
+	case StateC:
+		n.setState(StateC1)
+	case StateB:
+		n.setState(StateB1)
+	}
 }
 
 // writeError mirrors setItemValue(STATUS_ERROR).
@@ -320,7 +349,7 @@ func (s *Sim) Write(f []byte) (int, error) {
 			}
 			s.reply(addr, fc, []uint16{
 				uint16(n.State), uint16(n.Err), uint16(n.PWM), uint16(n.Mode),
-				0, 1, cfg, uint16(n.MaxA),
+				0, uint16(n.Access), cfg, uint16(n.MaxA),
 			}[:count])
 		} else if ok && !n.Offline && reg == regNodeEVMeter && count == 2 {
 			s.reply(addr, fc, []uint16{uint16(n.MeterType), uint16(n.MeterAddr)})
@@ -352,7 +381,7 @@ func (s *Sim) Write(f []byte) (int, error) {
 				switch i {
 				case 0:
 					if int(v) != n.State {
-						n.State = int(v)
+						n.setState(int(v))
 					}
 				case 1:
 					n.writeError(int(v))
@@ -377,6 +406,10 @@ func (s *Sim) Write(f []byte) (int, error) {
 			}
 		} else if n, ok := s.Nodes[addr]; ok && !n.Offline && reg == regNodeCfgChanged {
 			n.CfgChanged = val != 0
+			s.rx = append(s.rx, f...)
+		} else if ok && !n.Offline && reg == regNodeAccess && val <= AccessPause {
+			n.SetAccess(int(val))
+			n.stateMachine()
 			s.rx = append(s.rx, f...)
 		}
 	}
