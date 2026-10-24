@@ -280,7 +280,7 @@ func (m *Master) logCycle(imeas int, fresh bool) {
 	args := []any{
 		"source", m.mains.Source, "fresh", fresh,
 		"l1", float64(m.mains.L[0]) / 10, "l2", float64(m.mains.L[1]) / 10, "l3", float64(m.mains.L[2]) / 10,
-		"imeasured", float64(imeas) / 10,
+		"imeasured", float64(imeas) / 10, "powerW", m.mains.PowerW(),
 	}
 	for _, n := range m.sortedNodes() {
 		args = append(args, fmt.Sprintf("node%d", n.id), float64(m.bal.Balanced[n.slot()])/10)
@@ -649,6 +649,9 @@ type MeterInfo struct {
 // Snapshot is the externally visible state of the master.
 type Snapshot struct {
 	MainsA    [3]float64 `json:"mainsA"`
+	MainsV    [3]float64 `json:"mainsV"` // P1 voltage, 0 = not available (power uses 230 V)
+	MainsW    [3]int     `json:"mainsW"`
+	PowerW    int        `json:"powerW"` // total mains power, positive = import
 	MainsAge  float64    `json:"mainsAgeSeconds"`
 	Source    string     `json:"source"`
 	Fault     bool       `json:"fault"`
@@ -662,7 +665,10 @@ type Snapshot struct {
 func (m *Master) Snapshot() Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := Snapshot{Source: m.mains.Source, Fault: m.fault, MaxMainsA: m.cfg.MaxMains, Cycles: m.cycles, MainsAge: -1, CycleAge: -1}
+	s := Snapshot{
+		MainsV: m.mains.V, MainsW: m.mains.W, PowerW: m.mains.PowerW(),
+		Source: m.mains.Source, Fault: m.fault, MaxMainsA: m.cfg.MaxMains, Cycles: m.cycles, MainsAge: -1, CycleAge: -1,
+	}
 	for i, l := range m.mains.L {
 		s.MainsA[i] = float64(l) / 10
 	}

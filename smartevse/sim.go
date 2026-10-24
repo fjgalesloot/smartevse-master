@@ -503,10 +503,13 @@ func (s *Sim) sensorboxRegs(count uint16) []uint16 {
 	regs[0] = 0x0014
 	regs[1] = 0x3280 // DSMR 5.0, P1 present
 	m := s.mainsLocked()
+	volts := [3]float32{231.4, 229.8, 232.1}
 	for i := 0; i < 3; i++ {
-		bits := math.Float32bits(float32(m[i]))
-		regs[8+i*2] = uint16(bits >> 16)
-		regs[9+i*2] = uint16(bits)
+		for reg, f := range map[int]float32{2 + i*2: volts[i], 8 + i*2: float32(m[i])} {
+			bits := math.Float32bits(f)
+			regs[reg] = uint16(bits >> 16)
+			regs[reg+1] = uint16(bits)
+		}
 	}
 	if int(count) < len(regs) {
 		return regs[:count]

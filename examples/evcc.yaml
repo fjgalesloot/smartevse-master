@@ -30,16 +30,18 @@ site:
     grid: grid
 
 meters:
-  # Mains currents from the Sensorbox via evse-master (A per phase, positive =
-  # import, negative = export). Power is estimated as sum(I) x 230 V: the
-  # Sensorbox only gives currents. Fails while evse-master has no fresh mains
-  # reading (fault), so evcc does not act on stale values.
+  # Mains from the Sensorbox via evse-master, Modbus only (positive = import,
+  # negative = export). With P1, power is the smart meter's own per-phase power
+  # (voltage x current, both from the meter); with CTs, current x 230 V. No
+  # energy (kWh): the Sensorbox does not pass the meter's counters on. Fails
+  # while evse-master has no fresh mains reading (fault), so evcc does not act
+  # on stale values.
   - name: grid
     type: custom
     power:
       source: http
       uri: http://evse-master:7090/api/state
-      jq: if .fault then error("mains measurement lost") else .mainsA | add * 230 end
+      jq: if .fault then error("mains measurement lost") else .powerW end
       timeout: 5s
     currents:
       - source: http

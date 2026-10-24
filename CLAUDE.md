@@ -37,7 +37,10 @@ stays enforced outside evcc. Goal: later port `smartevse/` into evcc as a charge
   reg 0x0001 = LESS_6A.
 - Mains lost: set CT_NOCOMM on nodes and STOP broadcasting (mirrors firmware).
 - Sensorbox-2: addr 0x0A, FC04 reg 0x0000, 20 regs. reg1 low byte: 0x80 = P1, else CT.
-  P1 amps at reg 0x0008, CT amps at reg 0x000E, float32 big-endian, A.
+  P1 volts at reg 0x0002, P1 amps at reg 0x0008, CT amps at reg 0x000E, float32
+  big-endian. No power or energy registers (PIC and ESP firmware, Sensorbox-2 repo).
+  P1 amps = (21.7.0 - 22.7.0) / 32.7.0, so V × I is the meter's per-phase power
+  exactly; a missing P1 voltage reads 1 V. CT amps = real power / nominal V.
 - EV meter setting: status byte 13 (reg 0x0006) = config changed → FC04 reg 0x0108,
   2 regs (type = byte 1, address = byte 3), then FC06 reg 0x0006 = 0 to clear the flag.
 - Contactor 2 (1P/3P, `EnableC2`) is NOT reachable over Modbus: MENU_C2 (item 41) lies
@@ -62,7 +65,8 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   lost later. The bus logs loss/recovery once; requests fail with ErrBusDown meanwhile,
   which the master does not log
 - bus.go: FC03/FC04 read, FC10/FC06 write, broadcast without reply
-- sensorbox.go: decode P1/CT, plausibility checks
+- sensorbox.go: decode P1/CT, plausibility checks; power per phase in W (P1: V × I
+  when 180-270 V, else I × 230)
 - evmeter.go: EMConfig port (all Modbus meter types usable as EV meter; not Sensorbox,
   SolarEdge, API, HomeWizard, Custom), request frames and decoding (currents with sign
   from phase power, power, energy) as meter.cpp
@@ -118,7 +122,7 @@ Done (`cmd/evse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
   -nodes id:maxA[:host], -stale (11 s), -ct200, -default-enabled (default false), -sim, -log-level), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
-- api.go: GET /api/state, GET /api/nodes/{id} (evcc jq .status / .enabled /
+- api.go: GET /api/state (evcc grid meter: .powerW, .mainsA, error on .fault), GET /api/nodes/{id} (evcc jq .status / .enabled /
   .meter.powerW / .meter.energyKWh; .access on/pause/off; status "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
   POST /api/nodes/{id}/current?value= (float), GET|POST /api/nodes/{id}/phases[?value=1|3]
   (evcc getphases jq .phases / phases1p3p; 400 without host, 502 node error), GET /healthz (503 on stalled loop or
@@ -130,23 +134,11 @@ Done (`cmd/evse-master`, Dockerfile, `examples/`):
   (`{{.enable}}`, `{{.maxcurrent}}`, `{{.maxcurrentmillis}}`) per docs.evcc.io
   /en/reference/plugins and /en/user-defined-devices.
 
+Verified: real evcc (template rendering, resync after an evse-master restart),
+real hardware (node timing, pause, EV meters, 1P/3P), Docker build (docker8).
+
 TODO:
-1. Verify with a real evcc (-sim): template rendering of `{{.enable}}`/`{{.maxcurrentmillis}}`,
-   and what evcc does after an evse-master restart: enabled is re-read (evcc should
-   resync), but the current limit resets to the node cap and evcc probably does not
-   re-send it → consider persisting enable/limit or exposing a getter.
-2. tcp:// transport does not reconnect after the gateway drops the connection
-   (nodes fail safe, but the daemon stays dead) → reconnect in transport or exit.
-3. Docker image build not yet tested (no docker on the dev machine).
-4. Hardware verification: node timing (does a real node behave like Sim?), pause:
-   display shows PAUSE, a paused node written to B1 stays there, plug-in while
-   disabled is seen (A kept ON) and re-enable resumes; real car ramp rates. EV meters: node
-   shows no EV_NOCOMM, node web UI / OCPP energy follows the meter, meter answer time
-   fits the bus timeout. The firmware master leaves 50 ms between frames; this bus
-   does not — check the nodes still pick up the meter answers. 1P/3P: a switch while
-   charging pauses, the node goes C1 → B1 (real C1 up to 6 s), restarts on the new
-   phases; check evcc's phase detection (currents from the EV meter) follows.
-5. Later: port to evcc as `charger/smartevse-master.go` (one master, N chargers).
+1. Later: port to evcc as `charger/smartevse-master.go` (one master, N chargers).
 
 ## Conventions
 
