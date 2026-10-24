@@ -1,25 +1,25 @@
-# evcc configuration for two SmartEVSE-3 units (Node 1 / Node 2) behind smartevse-master.
+# evcc configuration for two SmartEVSE-3 units (Node 1 / Node 2) behind smartevse-master.galesloot-ict.local.
 #
-# smartevse-master enforces MaxMains on its own; evcc only enables/disables each
+# smartevse-master.galesloot-ict.local enforces MaxMains on its own; evcc only enables/disables each
 # node and sets its current. If evcc stops, nodes keep the last enable/current
-# evcc sent and stay within MaxMains. If smartevse-master stops, the nodes stop
+# evcc sent and stay within MaxMains. If smartevse-master.galesloot-ict.local stops, the nodes stop
 # charging after ~11 s (CT_NOCOMM).
 #
-# The grid meter is the Sensorbox (or the sim's mains) read through smartevse-master;
+# The grid meter is the Sensorbox (or the sim's mains) read through smartevse-master.galesloot-ict.local;
 # add a PV meter, battery etc. to the site as needed.
-# Host name: "smartevse-master" in docker-compose, otherwise the host running it.
+# Host name: "smartevse-master.galesloot-ict.local" in docker-compose, otherwise the host running it.
 #
-# 1p/3p switching goes through smartevse-master, which sets Contactor 2 on the node
+# 1p/3p switching goes through smartevse-master.galesloot-ict.local, which sets Contactor 2 on the node
 # over the node's WiFi REST API (Modbus cannot reach it): "Always Off" = 1P,
 # "Always On" = 3P. Needs a second contactor wired to C2 and the node's host in
-# smartevse-master's -nodes (id:maxA:host). The node only switches C2 when charging
-# (re)starts, so smartevse-master pauses a charging node until it has stopped and then
+# smartevse-master.galesloot-ict.local's -nodes (id:maxA:host). The node only switches C2 when charging
+# (re)starts, so smartevse-master.galesloot-ict.local pauses a charging node until it has stopped and then
 # lets it restart, as evcc's own smart-evse driver does (hence tos: true: evcc
 # itself does not pause around a switch). Each switch is a flash write on the
-# node. smartevse-master balances as if all nodes are 3P (safe for a 1P node).
+# node. smartevse-master.galesloot-ict.local balances as if all nodes are 3P (safe for a 1P node).
 #
-# Testing without hardware: start smartevse-master with -sim, then plug in a car:
-#   curl -X POST 'http://smartevse-master:7090/api/sim/nodes/1?connected=true&wants=true'
+# Testing without hardware: start smartevse-master.galesloot-ict.local with -sim, then plug in a car:
+#   curl -X POST 'http://smartevse-master.galesloot-ict.local:7090/api/sim/nodes/1?connected=true&wants=true'
 # Other sim controls: POST /api/sim/house?value=5,5,5, POST /api/sim/sensorbox?offline=true,
 # POST /api/sim/nodes/{id}?offline=|meteroffline=|carmax=|phases=|access=; GET /api/sim shows the
 # real mains and per node the meter total and the energy the node itself would report (OCPP).
@@ -30,30 +30,30 @@ site:
     grid: grid
 
 meters:
-  # Mains from the Sensorbox via smartevse-master, Modbus only (positive = import,
+  # Mains from the Sensorbox via smartevse-master.galesloot-ict.local, Modbus only (positive = import,
   # negative = export). With P1, power is the smart meter's own per-phase power
   # (voltage x current, both from the meter); with CTs, current x 230 V. No
   # energy (kWh): the Sensorbox does not pass the meter's counters on. Fails
-  # while smartevse-master has no fresh mains reading (fault), so evcc does not act
+  # while smartevse-master.galesloot-ict.local has no fresh mains reading (fault), so evcc does not act
   # on stale values.
   - name: grid
     type: custom
     power:
       source: http
-      uri: http://smartevse-master:7090/api/state
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/state
       jq: if .fault then error("mains measurement lost") else .powerW end
       timeout: 5s
     currents:
       - source: http
-        uri: http://smartevse-master:7090/api/state
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/state
         jq: if .fault then error("mains measurement lost") else .mainsA[0] end
         timeout: 5s
       - source: http
-        uri: http://smartevse-master:7090/api/state
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/state
         jq: if .fault then error("mains measurement lost") else .mainsA[1] end
         timeout: 5s
       - source: http
-        uri: http://smartevse-master:7090/api/state
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/state
         jq: if .fault then error("mains measurement lost") else .mainsA[2] end
         timeout: 5s
 
@@ -62,61 +62,61 @@ chargers:
     type: custom
     status: # A, B or C; fails while the node is offline
       source: http
-      uri: http://smartevse-master:7090/api/nodes/1
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1
       jq: .status
       timeout: 5s
     enabled:
       source: http
-      uri: http://smartevse-master:7090/api/nodes/1
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1
       jq: .enabled
       timeout: 5s
     enable:
       source: http
       method: POST
-      uri: http://smartevse-master:7090/api/nodes/1/enable?value={{.enable}}
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1/enable?value={{.enable}}
       timeout: 5s
     maxcurrent:
       source: http
       method: POST
-      uri: http://smartevse-master:7090/api/nodes/1/current?value={{.maxcurrent}}
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1/current?value={{.maxcurrent}}
       timeout: 5s
     maxcurrentmillis: # optional, SmartEVSE supports 0.1 A steps
       source: http
       method: POST
-      uri: http://smartevse-master:7090/api/nodes/1/current?value={{.maxcurrentmillis}}
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1/current?value={{.maxcurrentmillis}}
       timeout: 5s
-    power: # optional, from the node's EV meter (polled by smartevse-master)
+    power: # optional, from the node's EV meter (polled by smartevse-master.galesloot-ict.local)
       source: http
-      uri: http://smartevse-master:7090/api/nodes/1
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1
       jq: .meter.powerW
       timeout: 5s
     energy: # optional, EV meter total in kWh
       source: http
-      uri: http://smartevse-master:7090/api/nodes/1
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1
       jq: .meter.energyKWh
       timeout: 5s
     currents: # optional, EV meter current per phase (A): evcc counts the phases the car really uses
       - source: http
-        uri: http://smartevse-master:7090/api/nodes/1
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1
         jq: .meter.currentsA[0]
         timeout: 5s
       - source: http
-        uri: http://smartevse-master:7090/api/nodes/1
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1
         jq: .meter.currentsA[1]
         timeout: 5s
       - source: http
-        uri: http://smartevse-master:7090/api/nodes/1
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1
         jq: .meter.currentsA[2]
         timeout: 5s
-    tos: true # evcc does not pause around a switch; smartevse-master does
+    tos: true # evcc does not pause around a switch; smartevse-master.galesloot-ict.local does
     phases1p3p: # optional, needs -nodes 1:16:<host>; retries while the node's web server is busy
       source: http
       method: POST
-      uri: http://smartevse-master:7090/api/nodes/1/phases?value={{.phases}}
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1/phases?value={{.phases}}
       timeout: 20s
     getphases: # optional, phases of the node's contactor 2 setting, not what the car uses
       source: http
-      uri: http://smartevse-master:7090/api/nodes/1/phases
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1/phases
       jq: .phases
       timeout: 20s
 
@@ -124,61 +124,61 @@ chargers:
     type: custom
     status:
       source: http
-      uri: http://smartevse-master:7090/api/nodes/2
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2
       jq: .status
       timeout: 5s
     enabled:
       source: http
-      uri: http://smartevse-master:7090/api/nodes/2
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2
       jq: .enabled
       timeout: 5s
     enable:
       source: http
       method: POST
-      uri: http://smartevse-master:7090/api/nodes/2/enable?value={{.enable}}
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2/enable?value={{.enable}}
       timeout: 5s
     maxcurrent:
       source: http
       method: POST
-      uri: http://smartevse-master:7090/api/nodes/2/current?value={{.maxcurrent}}
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2/current?value={{.maxcurrent}}
       timeout: 5s
     maxcurrentmillis:
       source: http
       method: POST
-      uri: http://smartevse-master:7090/api/nodes/2/current?value={{.maxcurrentmillis}}
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2/current?value={{.maxcurrentmillis}}
       timeout: 5s
     power:
       source: http
-      uri: http://smartevse-master:7090/api/nodes/2
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2
       jq: .meter.powerW
       timeout: 5s
     energy:
       source: http
-      uri: http://smartevse-master:7090/api/nodes/2
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2
       jq: .meter.energyKWh
       timeout: 5s
     currents:
       - source: http
-        uri: http://smartevse-master:7090/api/nodes/2
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2
         jq: .meter.currentsA[0]
         timeout: 5s
       - source: http
-        uri: http://smartevse-master:7090/api/nodes/2
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2
         jq: .meter.currentsA[1]
         timeout: 5s
       - source: http
-        uri: http://smartevse-master:7090/api/nodes/2
+        uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2
         jq: .meter.currentsA[2]
         timeout: 5s
     tos: true
     phases1p3p:
       source: http
       method: POST
-      uri: http://smartevse-master:7090/api/nodes/2/phases?value={{.phases}}
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2/phases?value={{.phases}}
       timeout: 20s
     getphases:
       source: http
-      uri: http://smartevse-master:7090/api/nodes/2/phases
+      uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/2/phases
       jq: .phases
       timeout: 20s
 
@@ -187,7 +187,7 @@ loadpoints:
     charger: smartevse1
     mode: pv
     mincurrent: 6
-    maxcurrent: 16 # keep <= the -nodes cap; smartevse-master clamps anyway
+    maxcurrent: 16 # keep <= the -nodes cap; smartevse-master.galesloot-ict.local clamps anyway
     # Charge power and energy come from the charger's power/energy above (the
     # node's EV meter). Without an EV meter on the node, drop those and evcc
     # estimates power from the current it set.
