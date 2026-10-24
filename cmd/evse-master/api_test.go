@@ -16,7 +16,7 @@ func newTestAPI(t *testing.T) (http.Handler, *smartevse.Master) {
 	sim := smartevse.NewSim(1, 2)
 	bus := smartevse.NewBus(sim)
 	bus.BroadcastGap = 0
-	nodes, err := parseNodes("1:16, 2:10")
+	nodes, err := parseNodes("1:16:node1, 2:10")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +26,7 @@ func newTestAPI(t *testing.T) (http.Handler, *smartevse.Master) {
 		t.Fatal(err)
 	}
 	m.SetClock(sim.Now)
+	m.SetHTTPTransport(sim)
 	m.Cycle()
 	return newAPI(m, sim, log).routes(), m
 }
@@ -65,6 +66,47 @@ func TestAPINodeControl(t *testing.T) {
 	}
 }
 
+// 1P/3P switching through the node's REST API (sim), as evcc phases1p3p/getphases.
+func TestAPIPhases(t *testing.T) {
+	h, _ := newTestAPI(t)
+	phases := func(method, uri string) (int, int) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(method, uri, nil))
+		var p struct{ Phases int }
+		if rec.Code == http.StatusOK {
+			if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+				t.Fatalf("%s %s: %v", method, uri, err)
+			}
+		}
+		return rec.Code, p.Phases
+	}
+	if code, p := phases("GET", "/api/nodes/1/phases"); code != 200 || p != 3 {
+		t.Fatalf("initial: %d %d", code, p)
+	}
+	if code, p := phases("POST", "/api/nodes/1/phases?value=1"); code != 200 || p != 1 {
+		t.Fatalf("switch to 1P: %d %d", code, p)
+	}
+	if code, p := phases("GET", "/api/nodes/1/phases"); code != 200 || p != 1 {
+		t.Fatalf("after switch: %d %d", code, p)
+	}
+	if _, info := do(t, h, "GET", "/api/nodes/1"); info.Phases != 1 {
+		t.Errorf("node info phases %d, want 1", info.Phases)
+	}
+	for _, tc := range []struct {
+		method, uri string
+		code        int
+	}{
+		{"POST", "/api/nodes/1/phases?value=2", 400},
+		{"GET", "/api/nodes/2/phases", 400}, // no host configured
+		{"POST", "/api/nodes/2/phases?value=3", 400},
+	} {
+		if code, _ := phases(tc.method, tc.uri); code != tc.code {
+			t.Errorf("%s %s: got %d, want %d", tc.method, tc.uri, code, tc.code)
+		}
+	}
+}
+
 func TestAPIErrors(t *testing.T) {
 	h, _ := newTestAPI(t)
 	for _, tc := range []struct {
@@ -94,5 +136,9 @@ func TestParseNodes(t *testing.T) {
 	nodes, err := parseNodes("1:16,3:32,")
 	if err != nil || len(nodes) != 2 || nodes[1] != (smartevse.NodeConfig{ID: 3, MaxA: 32}) {
 		t.Fatalf("got %+v, %v", nodes, err)
+	}
+	nodes, err = parseNodes("1:16:smartevse1,2:16:172.29.1.41:8080")
+	if err != nil || len(nodes) != 2 || nodes[0].Host != "smartevse1" || nodes[1].Host != "172.29.1.41:8080" {
+		t.Fatalf("hosts: got %+v, %v", nodes, err)
 	}
 }

@@ -40,6 +40,12 @@ stays enforced outside evcc. Goal: later port `smartevse/` into evcc as a charge
   P1 amps at reg 0x0008, CT amps at reg 0x000E, float32 big-endian, A.
 - EV meter setting: status byte 13 (reg 0x0006) = config changed → FC04 reg 0x0108,
   2 regs (type = byte 1, address = byte 3), then FC06 reg 0x0006 = 0 to clear the flag.
+- Contactor 2 (1P/3P, `EnableC2`) is NOT reachable over Modbus: MENU_C2 (item 41) lies
+  outside the registers mapModbusRegister2ItemID maps (0x0200 + 22 = items 13-34). Only
+  the node's WiFi REST API (POST /settings?enable_C2=1|3, empty body; reply has
+  settings.enable_C2) or MQTT Set/EnableC2. The node applies it on entering C
+  (setState STATE_C). Its web server answers 503 "Server busy" when > 4 HTTP
+  connections are open (MAX_HTTP_CONNECTIONS).
 - EV meter reads: the node takes the register of an answer from the request it saw just
   before, and only acts on IRegister (current: resets its timeout), ERegister (energy)
   and PRegister (power) of its type, so requests must match the firmware exactly
@@ -66,11 +72,19 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   (Status, Enabled, Enable, MaxCurrent, MaxCurrentMillis), Snapshot for an API.
   After the broadcast: one online node's EV meter per cycle, round robin (current,
   energy, power if not in the current answer); readings in NodeInfo.Meter.
-  syncAccess: pauses nodes evcc disabled (access register), see deviation 5
+  syncAccess: pauses nodes evcc disabled (access register), see deviation 5.
+  Phases1p3p / GetPhases (evcc PhaseSwitcher / PhaseGetter): sets enable_C2 via the
+  node's REST API; a charging node whose setting changed is held paused (same access
+  mechanism) until it reports it left C, then resumed, so it restarts on the new
+  phases (evcc's smart-evse driver does the same with whenDisabled). Hold ends after
+  30 s at most. GetPhases reads the setting once (again after the node was offline)
+- nodeweb.go: REST client for enable_C2 (Connection: close, retries on 503)
 - sim.go: simulated bus (Sensorbox + nodes + an Eastron3P EV meter per node), node
   behaviour ported from the firmware state machine incl. STATUS_ERROR handling,
-  ChargeDelay, COMM_TIMEOUT, access (setAccess), EV meter listening and COMM_EVTIMEOUT
-- scenario_test.go: 20 scenarios; soak_test.go: 20 seeds × 2 h random events;
+  ChargeDelay, COMM_TIMEOUT, access (setAccess), EV meter listening and COMM_EVTIMEOUT;
+  contactor 2 (switched on entering C) and the node REST API as http.RoundTripper
+  (host "node<id>", WebBusy for 503s)
+- scenario_test.go: 22 scenarios; soak_test.go: 20 seeds × 2 h random events;
   evmeter_test.go: request frames per type, decode vectors (incl. one from the real bus)
 
 Deliberate deviations from the firmware (all found by the simulator):
@@ -102,11 +116,12 @@ stops all nodes; a household load change in that window goes unseen until then.
 
 Done (`cmd/evse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
-  -nodes, -stale (11 s), -ct200, -default-enabled (default false), -sim, -log-level), SIGTERM
+  -nodes id:maxA[:host], -stale (11 s), -ct200, -default-enabled (default false), -sim, -log-level), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
 - api.go: GET /api/state, GET /api/nodes/{id} (evcc jq .status / .enabled /
   .meter.powerW / .meter.energyKWh; .access on/pause/off; status "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
-  POST /api/nodes/{id}/current?value= (float), GET /healthz (503 on stalled loop or
+  POST /api/nodes/{id}/current?value= (float), GET|POST /api/nodes/{id}/phases[?value=1|3]
+  (evcc getphases jq .phases / phases1p3p; 400 without host, 502 node error), GET /healthz (503 on stalled loop or
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
   /api/sim/sensorbox?offline=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=&access=
   (access=on|pause|off as if changed on the node).
@@ -128,7 +143,9 @@ TODO:
    disabled is seen (A kept ON) and re-enable resumes; real car ramp rates. EV meters: node
    shows no EV_NOCOMM, node web UI / OCPP energy follows the meter, meter answer time
    fits the bus timeout. The firmware master leaves 50 ms between frames; this bus
-   does not — check the nodes still pick up the meter answers.
+   does not — check the nodes still pick up the meter answers. 1P/3P: a switch while
+   charging pauses, the node goes C1 → B1 (real C1 up to 6 s), restarts on the new
+   phases; check evcc's phase detection (currents from the EV meter) follows.
 5. Later: port to evcc as `charger/smartevse-master.go` (one master, N chargers).
 
 ## Conventions

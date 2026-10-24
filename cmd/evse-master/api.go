@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,8 @@ func (a *api) routes() http.Handler {
 	mux.HandleFunc("GET /api/nodes/{id}", a.nodeInfo)
 	mux.HandleFunc("POST /api/nodes/{id}/enable", a.nodeEnable)
 	mux.HandleFunc("POST /api/nodes/{id}/current", a.nodeCurrent)
+	mux.HandleFunc("GET /api/nodes/{id}/phases", a.nodePhases)
+	mux.HandleFunc("POST /api/nodes/{id}/phases", a.nodeSetPhases)
 	mux.HandleFunc("GET /healthz", a.healthz)
 	if a.sim != nil {
 		mux.HandleFunc("GET /api/sim", a.simState)
@@ -116,6 +119,51 @@ func (a *api) nodeCurrent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, n.Info())
 }
 
+type phasesInfo struct {
+	Phases int `json:"phases"`
+}
+
+// nodePhases returns the phases of the node's contactor 2 setting (evcc getphases).
+func (a *api) nodePhases(w http.ResponseWriter, r *http.Request) {
+	n := a.node(w, r)
+	if n == nil {
+		return
+	}
+	p, err := n.GetPhases()
+	if err != nil {
+		http.Error(w, err.Error(), phasesErrCode(err))
+		return
+	}
+	writeJSON(w, phasesInfo{p})
+}
+
+// phasesErrCode: a node without host is a configuration error, anything else
+// a failure of the node's web server.
+func phasesErrCode(err error) int {
+	if errors.Is(err, smartevse.ErrNoHost) {
+		return http.StatusBadRequest
+	}
+	return http.StatusBadGateway
+}
+
+// nodeSetPhases switches the node to ?value=1 or 3 phases (evcc phases1p3p).
+func (a *api) nodeSetPhases(w http.ResponseWriter, r *http.Request) {
+	n := a.node(w, r)
+	if n == nil {
+		return
+	}
+	v, err := strconv.Atoi(r.URL.Query().Get("value"))
+	if err != nil || (v != 1 && v != 3) {
+		http.Error(w, "value: want 1 or 3", http.StatusBadRequest)
+		return
+	}
+	if err := n.Phases1p3p(v); err != nil {
+		http.Error(w, err.Error(), phasesErrCode(err))
+		return
+	}
+	writeJSON(w, phasesInfo{v})
+}
+
 // ---- simulator control (-sim only) ------------------------------------------
 
 type simNodeInfo struct {
@@ -128,6 +176,8 @@ type simNodeInfo struct {
 	State     string  `json:"state"`
 	Errors    int     `json:"errors"`
 	Access    string  `json:"access"`
+	EnableC2  int     `json:"enableC2"`   // contactor 2 setting (1 = 1P, 3 = 3P)
+	NrPhases  int     `json:"nrOfPhases"` // contactors as switched on entering C
 	PWMA      float64 `json:"pwmA"`
 	DrawA     float64 `json:"drawA"`
 
@@ -160,7 +210,8 @@ func (a *api) simInfo() simInfo {
 			s.Nodes = append(s.Nodes, simNodeInfo{
 				ID: id, Offline: n.Offline, Connected: n.Connected, Wants: n.Wants,
 				CarMaxA: n.CarMaxA, Phases: n.Phases, State: smartevse.StateName(n.State),
-				Errors: n.Err, Access: smartevse.AccessName(n.Access), PWMA: float64(n.PWM) / 10, DrawA: n.EVCurrent(),
+				Errors: n.Err, Access: smartevse.AccessName(n.Access), EnableC2: n.EnableC2, NrPhases: n.NrOfPhases,
+				PWMA: float64(n.PWM) / 10, DrawA: n.EVCurrent(),
 				MeterAddress: n.MeterAddr, MeterOffline: n.MeterOffline, MeterKWh: n.MeterKWh, HeardKWh: n.HeardKWh,
 			})
 		}

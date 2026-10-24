@@ -34,7 +34,7 @@ func run() error {
 		maxMains       = flag.Int("max-mains", 0, "max mains current per phase in A (required)")
 		maxCircuit     = flag.Int("max-circuit", 0, "max current per phase for all EVSEs together in A, 0 = disabled")
 		minCurrent     = flag.Int("min-current", 6, "minimum charge current in A")
-		nodes          = flag.String("nodes", "1:16,2:16", "nodes as id:maxA, comma separated (id = Load Balancing setting 1..7)")
+		nodes          = flag.String("nodes", "1:16,2:16", "nodes as id:maxA[:host], comma separated (id = Load Balancing setting 1..7, host = WiFi address for 1P/3P switching)")
 		stale          = flag.Duration("stale", 11*time.Second, "mains data older than this stops all nodes (firmware: 11s)")
 		ct200          = flag.Bool("ct200", false, "Sensorbox CTs are 200A:50mA")
 		defaultEnabled = flag.Bool("default-enabled", false, "nodes may charge before evcc enabled them")
@@ -79,6 +79,7 @@ func run() error {
 		ids := make([]int, len(nodeCfg))
 		for i, nc := range nodeCfg {
 			ids[i] = nc.ID
+			cfg.Nodes[i].Host = fmt.Sprintf("node%d", nc.ID) // the sim's REST API
 		}
 		sim = smartevse.NewSim(ids...)
 		sim.House = [3]float64{5, 5, 5}
@@ -98,6 +99,9 @@ func run() error {
 	m, err := smartevse.NewMaster(bus, cfg, log)
 	if err != nil {
 		return err
+	}
+	if sim != nil {
+		m.SetHTTPTransport(sim)
 	}
 
 	srv := &http.Server{
@@ -147,7 +151,8 @@ func advanceSim(ctx context.Context, sim *smartevse.Sim) {
 	}
 }
 
-// parseNodes parses "1:16,2:16" into node configs.
+// parseNodes parses "1:16:smartevse1,2:16" into node configs. The host may
+// carry a port (1:16:smartevse1:8080).
 func parseNodes(s string) ([]smartevse.NodeConfig, error) {
 	var nodes []smartevse.NodeConfig
 	for _, part := range strings.Split(s, ",") {
@@ -155,19 +160,23 @@ func parseNodes(s string) ([]smartevse.NodeConfig, error) {
 		if part == "" {
 			continue
 		}
-		idStr, maxStr, ok := strings.Cut(part, ":")
-		if !ok {
-			return nil, fmt.Errorf("node %q: want id:maxA", part)
+		fields := strings.SplitN(part, ":", 3)
+		if len(fields) < 2 {
+			return nil, fmt.Errorf("node %q: want id:maxA[:host]", part)
 		}
-		id, err := strconv.Atoi(idStr)
+		id, err := strconv.Atoi(fields[0])
 		if err != nil {
 			return nil, fmt.Errorf("node %q: id: %w", part, err)
 		}
-		max, err := strconv.Atoi(maxStr)
+		max, err := strconv.Atoi(fields[1])
 		if err != nil {
 			return nil, fmt.Errorf("node %q: max: %w", part, err)
 		}
-		nodes = append(nodes, smartevse.NodeConfig{ID: id, MaxA: max})
+		nc := smartevse.NodeConfig{ID: id, MaxA: max}
+		if len(fields) == 3 {
+			nc.Host = fields[2]
+		}
+		nodes = append(nodes, nc)
 	}
 	return nodes, nil
 }

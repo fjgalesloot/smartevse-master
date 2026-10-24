@@ -5,9 +5,9 @@ services:
     command:
       - -port=/dev/ttyUSB0          # or tcp://192.168.1.50:502 (transparent RS485 gateway, raw RTU)
       - -max-mains=25
-      - -nodes=1:16,2:16
+      - -nodes=1:16:smartevse1,2:16:smartevse2   # id:maxA:host, host = node WiFi for 1P/3P switching
       - -log-level=debug
-      - -sniff
+      # - -sniff
       # - -sim                       # no hardware: simulated Sensorbox + nodes (see evcc.yaml)
     devices:
       - /dev/ttyUSB-SmartEVSE:/dev/ttyUSB0
@@ -15,3 +15,25 @@ services:
       - "20"                         # gid of the serial device on the host: stat -c %g /dev/ttyUSB0
     ports:
       - "7090:7090"
+    extra_hosts:                     # the nodes' WiFi, for 1P/3P switching
+      smartevse1: 172.29.1.40
+      smartevse2: 172.29.1.41
+  evcc:
+    # evcc.yaml is baked into the image: the build context is uploaded to the
+    # daemon, so this also works with a remote docker context (bind mounts would
+    # resolve on the remote host). Rebuild after editing: docker compose up -d --build
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM evcc/evcc:0.317.2
+        COPY evcc.yaml /etc/evcc.yaml
+    container_name: evcc
+    restart: unless-stopped
+    depends_on:
+      - evse-master
+    volumes:
+      - evcc-data:/root/.evcc        # evcc database (settings, sessions)
+    ports:
+      - 7070:7070/tcp
+volumes:
+  evcc-data:

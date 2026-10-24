@@ -158,3 +158,15 @@ current moves from one car to another.
   - the EV meter setting is also re-read when a node comes back online;
   - there is no separate power read for meters whose current answer already
     holds the phase powers.
+- **1P/3P switching (repo only).** The firmware master switches phases only for
+  its own EVSE (Solar mode, `EnableC2 = AUTO`; "Nodes are not supported yet",
+  main.cpp:1062). This master switches nodes for evcc.
+  - **Over WiFi:** it sets contactor 2 through the node's REST API
+    (`POST /settings?enable_C2=1|3`). Modbus cannot reach that setting: menu item
+    41 lies outside the registers `mapModbusRegister2ItemID` maps.
+  - **When it applies:** the node switches its contactors when it next enters C
+    (main.cpp:686–702). A charging node whose setting changed is therefore held
+    paused through its access register until it reports that it has left C, then
+    resumed. evcc's own `smart-evse` driver does the same (`whenDisabled`).
+  - **Busy node:** the node's web server answers 503 when more than 4 HTTP
+    connections are open. Each request closes its connection and is retried.

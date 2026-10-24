@@ -28,7 +28,7 @@ func newHarness(t *testing.T, mutate ...func(*Config)) *harness {
 	cfg := Config{
 		MaxMains:       25,
 		MinCurrent:     6,
-		Nodes:          []NodeConfig{{ID: 1, MaxA: 16}, {ID: 2, MaxA: 16}},
+		Nodes:          []NodeConfig{{ID: 1, MaxA: 16, Host: "node1"}, {ID: 2, MaxA: 16, Host: "node2"}},
 		DefaultEnabled: true,
 	}
 	for _, f := range mutate {
@@ -51,6 +51,7 @@ func newHarness(t *testing.T, mutate ...func(*Config)) *harness {
 		t.Fatal(err)
 	}
 	m.SetClock(sim.Now)
+	m.SetHTTPTransport(sim)
 	return &harness{t: t, sim: sim, m: m, cfg: cfg}
 }
 
@@ -356,6 +357,69 @@ func TestScenarioAccessChangedOnNode(t *testing.T) {
 	}
 	if a := h.sim.Node(1).Access; a != AccessPause {
 		t.Errorf("node 1 access %s, want pause", AccessName(a))
+	}
+}
+
+// evcc switches a charging car from 3P to 1P and back. The node only switches
+// its contactors on entering C, so the master pauses it until it has stopped
+// and then lets it restart. The node's web server is busy at first (503).
+func TestScenarioPhaseSwitchWhileCharging(t *testing.T) {
+	h := newHarness(t)
+	h.plugIn(1)
+	h.runUntil(10*time.Second, "node 1 charging", h.charging(1))
+	h.run(20 * time.Second)
+	n := h.sim.Node(1)
+	if p, err := h.m.Node(1).GetPhases(); err != nil || p != 3 || n.ActivePhases() != 3 {
+		t.Fatalf("initial phases %d (%v), active %d", p, err, n.ActivePhases())
+	}
+
+	for _, want := range []int{1, 3} {
+		n.WebBusy = 2
+		if err := h.m.Node(1).Phases1p3p(want); err != nil {
+			t.Fatalf("switch to %dP: %v", want, err)
+		}
+		if !h.m.Node(1).Info().Switch || n.WebBusy != 0 {
+			t.Errorf("switch to %dP: node should be held for the switch after retrying (busy %d)", want, n.WebBusy)
+		}
+		stopped := false
+		took := h.runUntil(40*time.Second, "charging on new phases", func() bool {
+			stopped = stopped || h.amps(1) == 0
+			return h.charging(1)() && n.ActivePhases() == want
+		})
+		t.Logf("charging on %dP %v after the switch", want, took)
+		if !stopped {
+			t.Errorf("switch to %dP: the car never stopped", want)
+		}
+		if info := h.m.Node(1).Info(); info.Switch || info.Phases != want || n.Access != AccessOn || n.Err != 0 {
+			t.Errorf("after switch to %dP: %+v, node access %s err %d", want, info, AccessName(n.Access), n.Err)
+		}
+		h.run(20 * time.Second)
+		if m := h.sim.Mains(); want == 1 && (m[1] != 5 || m[2] != 5) {
+			t.Errorf("1P: L2/L3 should carry only the house load, mains %v", m)
+		}
+	}
+	if h.peakOver > 0 {
+		t.Errorf("mains exceeded by %.1f A\n%s", h.peakOver, h.peakAt)
+	}
+
+	// the same setting again does not interrupt charging
+	if err := h.m.Node(1).Phases1p3p(3); err != nil || h.m.Node(1).Info().Switch {
+		t.Errorf("repeated 3P: err %v, held %v", err, h.m.Node(1).Info().Switch)
+	}
+}
+
+// A switch while no car charges just changes the setting: the next charge
+// starts on the new phases.
+func TestScenarioPhaseSwitchIdle(t *testing.T) {
+	h := newHarness(t)
+	h.run(2 * Interval)
+	if err := h.m.Node(1).Phases1p3p(1); err != nil || h.m.Node(1).Info().Switch {
+		t.Fatalf("switch: err %v, held %v", err, h.m.Node(1).Info().Switch)
+	}
+	h.plugIn(1)
+	h.runUntil(10*time.Second, "node 1 charging", h.charging(1))
+	if p := h.sim.Node(1).ActivePhases(); p != 1 {
+		t.Errorf("charging on %d phases, want 1", p)
 	}
 }
 

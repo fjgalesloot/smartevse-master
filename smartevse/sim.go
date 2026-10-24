@@ -2,8 +2,14 @@ package smartevse
 
 import (
 	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -48,7 +54,13 @@ type SimNode struct {
 	Connected bool    // cable plugged in
 	Wants     bool    // car wants to charge (pulls CP to 6V when PWM present)
 	CarMaxA   float64 // what the car draws at most
-	Phases    int     // 1 or 3
+	Phases    int     // 1 or 3, what the car can use
+
+	// contactor 2 (1P/3P): EnableC2 is the setting (WiFi REST API only),
+	// NrOfPhases what the contactors were switched to on entering C.
+	EnableC2   int
+	NrOfPhases int
+	WebBusy    int // the next WebBusy REST requests are answered 503 (too many connections)
 
 	// EV meter: node setting (reg 0x0108/0x0109) and the meter itself, a
 	// separate device on the bus that answers at MeterAddr. Only Eastron3P is
@@ -91,6 +103,7 @@ func NewSim(ids ...int) *Sim {
 			MaxA: 16, Mode: ModeSmart, CarMaxA: 16, Phases: 3,
 			MeterType: MeterEastron3P, MeterAddr: 16 + id, MeterKWh: 1000 * float64(id),
 			Timeout: COMMTimeout, EVTimeout: COMMTimeout, PWM: 60, Access: AccessOn,
+			EnableC2: C2AlwaysOn, NrOfPhases: 3,
 		}
 	}
 	return s
@@ -119,7 +132,7 @@ func (s *Sim) Advance(d time.Duration) {
 		}
 		s.now = s.now.Add(step)
 		for _, n := range s.Nodes {
-			n.MeterKWh += n.EVCurrent() * float64(n.Phases) * 230 * step.Hours() / 1000
+			n.MeterKWh += n.EVCurrent() * float64(n.ActivePhases()) * 230 * step.Hours() / 1000
 			n.acc += step
 			for n.acc >= time.Second {
 				n.acc -= time.Second
@@ -145,6 +158,12 @@ func (n *SimNode) EVCurrent() float64 {
 	return math.Min(float64(n.PWM)/10, n.CarMaxA)
 }
 
+// ActivePhases is the number of phases the car draws on: what the car can
+// use, limited by the contactors.
+func (n *SimNode) ActivePhases() int {
+	return min(n.Phases, n.NrOfPhases)
+}
+
 // Mains returns the real mains currents (house + all EVs), in A.
 func (s *Sim) Mains() [3]float64 {
 	s.mu.Lock()
@@ -156,7 +175,7 @@ func (s *Sim) mainsLocked() [3]float64 {
 	m := s.House
 	for _, n := range s.Nodes {
 		i := n.EVCurrent()
-		for p := 0; p < n.Phases && p < 3; p++ {
+		for p := 0; p < n.ActivePhases() && p < 3; p++ {
 			m[p] += i
 		}
 	}
@@ -268,6 +287,8 @@ func (n *SimNode) stateMachine() {
 		}
 	case StateCommCOK:
 		n.State = StateC
+		// setState(STATE_C) switches the contactors (Force_Single_Phase_Charging, Smart mode)
+		n.NrOfPhases = c2Phases(n.EnableC2)
 	case StateC:
 		if p == pilot12V {
 			n.State = StateA
@@ -436,7 +457,7 @@ func (s *Sim) meterRequest(m *SimNode, reg, count uint16) {
 	case reg == simEastronCurrent && count == 12:
 		i := m.EVCurrent()
 		for p := 0; p < 3; p++ {
-			if p >= m.Phases {
+			if p >= m.ActivePhases() {
 				i = 0
 			}
 			vals = append(vals, i)
@@ -510,6 +531,47 @@ func (s *Sim) SetReadDeadline(time.Time) error { return nil }
 
 // Close is a no-op.
 func (s *Sim) Close() error { return nil }
+
+// ---- node WiFi REST API ------------------------------------------------------------
+
+// RoundTrip answers HTTP requests to the nodes' REST API at host "node<id>",
+// so the Sim can serve as the Master's HTTP transport (SetHTTPTransport). Only
+// GET /settings and POST /settings?enable_C2= are simulated.
+func (s *Sim) RoundTrip(r *http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var id int
+	_, err := fmt.Sscanf(r.URL.Host, "node%d", &id)
+	n := s.Node(id)
+	if err != nil || n == nil || n.Offline {
+		return nil, fmt.Errorf("sim: no node at %s", r.URL.Host)
+	}
+	if n.WebBusy > 0 {
+		n.WebBusy--
+		return simResponse(r, http.StatusServiceUnavailable, "Server busy, retry shortly"), nil
+	}
+	if r.URL.Path != "/settings" || (r.Method != http.MethodGet && r.Method != http.MethodPost) {
+		return simResponse(r, http.StatusNotFound, "not found"), nil
+	}
+	if v := r.URL.Query().Get("enable_C2"); v != "" && r.Method == http.MethodPost {
+		if c2, err := strconv.Atoi(v); err == nil && c2 >= 0 && c2 < len(c2Names) {
+			n.EnableC2 = c2
+		}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"evse":     map[string]any{"nrofphases": n.NrOfPhases},
+		"settings": map[string]any{"enable_C2": c2Names[n.EnableC2]},
+	})
+	return simResponse(r, http.StatusOK, string(body)), nil
+}
+
+func simResponse(r *http.Request, code int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: code, Status: fmt.Sprintf("%d %s", code, http.StatusText(code)),
+		Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+		Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r,
+	}
+}
 
 // Broadcasts returns the current broadcasts sent since t.
 func (s *Sim) Broadcasts(since time.Time) int {

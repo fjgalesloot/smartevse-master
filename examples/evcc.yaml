@@ -5,14 +5,55 @@
 # evcc sent and stay within MaxMains. If evse-master stops, the nodes stop
 # charging after ~11 s (CT_NOCOMM).
 #
-# Only the chargers and loadpoints are shown; add your site, grid meter etc.
+# The grid meter is the Sensorbox (or the sim's mains) read through evse-master;
+# add a PV meter, battery etc. to the site as needed.
 # Host name: "evse-master" in docker-compose, otherwise the host running it.
+#
+# 1p/3p switching goes through evse-master, which sets Contactor 2 on the node
+# over the node's WiFi REST API (Modbus cannot reach it): "Always Off" = 1P,
+# "Always On" = 3P. Needs a second contactor wired to C2 and the node's host in
+# evse-master's -nodes (id:maxA:host). The node only switches C2 when charging
+# (re)starts, so evse-master pauses a charging node until it has stopped and then
+# lets it restart, as evcc's own smart-evse driver does (hence tos: true: evcc
+# itself does not pause around a switch). Each switch is a flash write on the
+# node. evse-master balances as if all nodes are 3P (safe for a 1P node).
 #
 # Testing without hardware: start evse-master with -sim, then plug in a car:
 #   curl -X POST 'http://evse-master:7090/api/sim/nodes/1?connected=true&wants=true'
 # Other sim controls: POST /api/sim/house?value=5,5,5, POST /api/sim/sensorbox?offline=true,
-# POST /api/sim/nodes/{id}?offline=|meteroffline=|carmax=|phases=; GET /api/sim shows the
+# POST /api/sim/nodes/{id}?offline=|meteroffline=|carmax=|phases=|access=; GET /api/sim shows the
 # real mains and per node the meter total and the energy the node itself would report (OCPP).
+
+site:
+  title: Home
+  meters:
+    grid: grid
+
+meters:
+  # Mains currents from the Sensorbox via evse-master (A per phase, positive =
+  # import, negative = export). Power is estimated as sum(I) x 230 V: the
+  # Sensorbox only gives currents. Fails while evse-master has no fresh mains
+  # reading (fault), so evcc does not act on stale values.
+  - name: grid
+    type: custom
+    power:
+      source: http
+      uri: http://evse-master:7090/api/state
+      jq: if .fault then error("mains measurement lost") else .mainsA | add * 230 end
+      timeout: 5s
+    currents:
+      - source: http
+        uri: http://evse-master:7090/api/state
+        jq: if .fault then error("mains measurement lost") else .mainsA[0] end
+        timeout: 5s
+      - source: http
+        uri: http://evse-master:7090/api/state
+        jq: if .fault then error("mains measurement lost") else .mainsA[1] end
+        timeout: 5s
+      - source: http
+        uri: http://evse-master:7090/api/state
+        jq: if .fault then error("mains measurement lost") else .mainsA[2] end
+        timeout: 5s
 
 chargers:
   - name: smartevse1
@@ -52,6 +93,30 @@ chargers:
       uri: http://evse-master:7090/api/nodes/1
       jq: .meter.energyKWh
       timeout: 5s
+    currents: # optional, EV meter current per phase (A): evcc counts the phases the car really uses
+      - source: http
+        uri: http://evse-master:7090/api/nodes/1
+        jq: .meter.currentsA[0]
+        timeout: 5s
+      - source: http
+        uri: http://evse-master:7090/api/nodes/1
+        jq: .meter.currentsA[1]
+        timeout: 5s
+      - source: http
+        uri: http://evse-master:7090/api/nodes/1
+        jq: .meter.currentsA[2]
+        timeout: 5s
+    tos: true # evcc does not pause around a switch; evse-master does
+    phases1p3p: # optional, needs -nodes 1:16:<host>; retries while the node's web server is busy
+      source: http
+      method: POST
+      uri: http://evse-master:7090/api/nodes/1/phases?value={{.phases}}
+      timeout: 20s
+    getphases: # optional, phases of the node's contactor 2 setting, not what the car uses
+      source: http
+      uri: http://evse-master:7090/api/nodes/1/phases
+      jq: .phases
+      timeout: 20s
 
   - name: smartevse2
     type: custom
@@ -90,6 +155,30 @@ chargers:
       uri: http://evse-master:7090/api/nodes/2
       jq: .meter.energyKWh
       timeout: 5s
+    currents:
+      - source: http
+        uri: http://evse-master:7090/api/nodes/2
+        jq: .meter.currentsA[0]
+        timeout: 5s
+      - source: http
+        uri: http://evse-master:7090/api/nodes/2
+        jq: .meter.currentsA[1]
+        timeout: 5s
+      - source: http
+        uri: http://evse-master:7090/api/nodes/2
+        jq: .meter.currentsA[2]
+        timeout: 5s
+    tos: true
+    phases1p3p:
+      source: http
+      method: POST
+      uri: http://evse-master:7090/api/nodes/2/phases?value={{.phases}}
+      timeout: 20s
+    getphases:
+      source: http
+      uri: http://evse-master:7090/api/nodes/2/phases
+      jq: .phases
+      timeout: 20s
 
 loadpoints:
   - title: Carport left

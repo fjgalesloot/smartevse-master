@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -12,8 +13,9 @@ import (
 
 // NodeConfig describes one SmartEVSE configured as "Node <ID>".
 type NodeConfig struct {
-	ID   int // 1..7, the Load Balancing setting on the unit (Node 1 = Modbus address 2)
-	MaxA int // hard cap in A, applied on top of what the node reports
+	ID   int    // 1..7, the Load Balancing setting on the unit (Node 1 = Modbus address 2)
+	MaxA int    // hard cap in A, applied on top of what the node reports
+	Host string // WiFi host name or address of the unit, for 1P/3P switching; "" = none
 }
 
 // Config for the master.
@@ -45,7 +47,15 @@ type node struct {
 
 	cfgChanged bool // EV meter setting must be (re)read: at start, back online, or flagged by the node
 	meter      evMeter
+
+	host string    // WiFi REST API, for the contactor 2 setting
+	c2   int       // contactor 2 setting (C2AlwaysOff ...), -1 = not read yet
+	hold time.Time // phase switch: paused until the node has left C; zero = none
 }
+
+// holdTimeout ends a phase switch pause that does not complete (C1 lasts at
+// most 6 s in the firmware, then the node goes to B1).
+const holdTimeout = 30 * time.Second
 
 // evMeter is a node's EV meter as set on the node, with the last readings.
 type evMeter struct {
@@ -78,6 +88,8 @@ type Master struct {
 	cycles  uint64
 	cycleAt time.Time
 	meterID int // node whose EV meter was polled last
+
+	web *nodeWeb // not locked by mu: used outside it
 }
 
 // NewMaster validates the config and creates a master.
@@ -105,6 +117,7 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 		now:   time.Now,
 		nodes: make(map[int]*node),
 		bal:   Balancer{MaxMains: cfg.MaxMains, MaxCircuit: cfg.MaxCircuit, MinCurrent: cfg.MinCurrent},
+		web:   newNodeWeb(),
 	}
 	for _, nc := range cfg.Nodes {
 		if nc.ID < 1 || nc.ID > 7 {
@@ -119,6 +132,7 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 		m.nodes[nc.ID] = &node{
 			id: nc.ID, addr: byte(nc.ID + 1), capA: nc.MaxA,
 			enabled: cfg.DefaultEnabled, limit: nc.MaxA * 10, cfgChanged: true,
+			host: nc.Host, c2: -1,
 		}
 	}
 	return m, nil
@@ -126,6 +140,13 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 
 // SetClock replaces the clock (for tests and simulation).
 func (m *Master) SetClock(now func() time.Time) { m.now = now }
+
+// SetHTTPTransport replaces the transport to the nodes' REST API (for tests
+// and simulation: Sim implements it). Call before Run.
+func (m *Master) SetHTTPTransport(rt http.RoundTripper) {
+	m.web.client.Transport = rt
+	m.web.pause = 0
+}
 
 // Run executes the control cycle every Interval until ctx is done.
 func (m *Master) Run(ctx context.Context) {
@@ -190,6 +211,7 @@ func (m *Master) control() {
 		if n.online == 0 {
 			m.log.Info("node online", "node", n.id)
 			n.cfgChanged = true // may have restarted with other settings
+			n.c2 = -1
 		}
 		n.online = 5
 		n.state, n.err, n.mode, n.access, n.maxA = int(data[1]), int(data[3]), int(data[7]), int(data[11]), int(data[15])
@@ -282,8 +304,21 @@ func (m *Master) warn(msg string, err error, args ...any) {
 // A node without a car (state A) is set to ON: a paused node in A ignores a car
 // being plugged in, so evcc would never see it connect. Plugging in then makes
 // it ask to charge (COMM_B), and it is paused in the same cycle.
+//
+// A phase switch holds the node paused the same way until it reports that it
+// has left C (B1 or B), so it restarts and switches its contactors.
 func (m *Master) syncAccess() {
 	for _, n := range m.sortedNodes() {
+		if !n.hold.IsZero() {
+			left := n.access == AccessPause && n.state != StateC && n.state != StateD &&
+				n.state != StateC1 && n.state != StateCommCOK
+			if timeout := m.cycleAt.Sub(n.hold) > holdTimeout; left || timeout || n.online == 0 {
+				if timeout {
+					m.log.Warn("phase switch: node did not stop charging, resuming", "node", n.id)
+				}
+				n.hold = time.Time{}
+			}
+		}
 		if n.online == 0 {
 			continue
 		}
@@ -422,8 +457,10 @@ func (m *Master) readMeterSetting(n *node) bool {
 	return true
 }
 
+// allowed reports whether a node may charge: evcc enabled it with a usable
+// limit, and no phase switch is waiting for it to stop.
 func (m *Master) allowed(n *node) bool {
-	return n.enabled && n.limit >= m.cfg.MinCurrent*10
+	return n.enabled && n.limit >= m.cfg.MinCurrent*10 && n.hold.IsZero()
 }
 
 // effectiveMax is the most a node may ever get: the lowest of what the node
@@ -514,6 +551,70 @@ func (h *Node) MaxCurrentMillis(current float64) error {
 	return nil
 }
 
+// ErrNoHost is returned for 1P/3P switching on a node without a WiFi host.
+var ErrNoHost = errors.New("no host configured for this node (-nodes id:maxA:host)")
+
+// Phases1p3p switches the node between 1 and 3 phases through contactor 2
+// (evcc api.PhaseSwitcher). The setting goes to the node's WiFi REST API;
+// the node applies it when it next enters C. A charging node is paused until
+// it has stopped, then resumed, as evcc's smart-evse driver does (whenDisabled).
+func (h *Node) Phases1p3p(phases int) error {
+	var c2 int
+	switch phases {
+	case 1:
+		c2 = C2AlwaysOff
+	case 3:
+		c2 = C2AlwaysOn
+	default:
+		return fmt.Errorf("invalid phases: %d", phases)
+	}
+	m := h.m
+	n := m.nodes[h.id] // host is fixed after NewMaster
+	if n.host == "" {
+		return ErrNoHost
+	}
+	if err := m.web.setEnableC2(n.host, c2); err != nil {
+		return fmt.Errorf("node %d: %w", h.id, err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	charging := n.state == StateC || n.state == StateD || n.state == StateCommCOK
+	restart := charging && n.c2 != c2
+	n.c2 = c2
+	if restart {
+		n.hold = m.now()
+	}
+	m.log.Info("phases set", "node", h.id, "phases", phases, "restart", restart)
+	return nil
+}
+
+// GetPhases returns the phases the node's contactor 2 setting gives
+// (evcc api.PhaseGetter). Read from the node's WiFi REST API the first time.
+func (h *Node) GetPhases() (int, error) {
+	m := h.m
+	n := m.nodes[h.id]
+	if n.host == "" {
+		return 0, ErrNoHost
+	}
+	m.mu.Lock()
+	c2 := n.c2
+	m.mu.Unlock()
+	if c2 < 0 {
+		var err error
+		if c2, err = m.web.enableC2(n.host); err != nil {
+			return 0, fmt.Errorf("node %d: %w", h.id, err)
+		}
+		m.mu.Lock()
+		if n.c2 < 0 {
+			n.c2 = c2
+		}
+		c2 = n.c2
+		m.mu.Unlock()
+	}
+	return c2Phases(c2), nil
+}
+
 // ---- snapshot -------------------------------------------------------------------
 
 // NodeInfo is the externally visible state of a node.
@@ -523,7 +624,9 @@ type NodeInfo struct {
 	State    string     `json:"state"`
 	Status   string     `json:"status"`
 	Errors   int        `json:"errors"`
-	Access   string     `json:"access"` // on, pause or off (node access register)
+	Access   string     `json:"access"`           // on, pause or off (node access register)
+	Phases   int        `json:"phases,omitempty"` // contactor 2 setting, once known (GetPhases)
+	Switch   bool       `json:"phaseSwitch"`      // paused for a phase switch
 	Enabled  bool       `json:"enabled"`
 	LimitA   float64    `json:"limitA"`
 	MaxA     float64    `json:"maxA"`     // effective cap
@@ -595,9 +698,13 @@ func (m *Master) nodeInfo(n *node) NodeInfo {
 	default:
 		status = "B"
 	}
+	var phases int
+	if n.c2 >= 0 {
+		phases = c2Phases(n.c2)
+	}
 	return NodeInfo{
 		ID: n.id, Online: n.online > 0, State: StateName(n.state), Status: status, Errors: n.err,
-		Access: AccessName(n.access), Enabled: n.enabled, LimitA: float64(n.limit) / 10,
+		Access: AccessName(n.access), Phases: phases, Switch: !n.hold.IsZero(), Enabled: n.enabled, LimitA: float64(n.limit) / 10,
 		MaxA:     float64(m.effectiveMax(n)) / 10,
 		CurrentA: float64(m.bal.Balanced[n.slot()]) / 10,
 		Meter:    m.meterInfo(n),

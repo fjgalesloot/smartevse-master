@@ -26,7 +26,7 @@ func TestSoak(t *testing.T) {
 			if r.Intn(10) == 0 {
 				id := 1 + r.Intn(2)
 				n := h.sim.Node(id)
-				switch e := r.Intn(9); e {
+				switch e := r.Intn(10); e {
 				case 0:
 					n.Connected = !n.Connected
 					n.Wants = n.Connected
@@ -53,6 +53,9 @@ func TestSoak(t *testing.T) {
 				case 8:
 					n.MaxA = 10 + r.Intn(7)
 					events["node max"]++
+				case 9:
+					_ = h.m.Node(id).Phases1p3p(1 + 2*r.Intn(2)) // fails while the node is off the bus
+					events["phase switch"]++
 				}
 			}
 			h.run(Interval)
