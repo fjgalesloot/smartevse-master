@@ -1,6 +1,7 @@
 services:
   smartevse-master:
     build: ..
+    # image: ghcr.io/fjgalesloot/smartevse-master:latest   # instead of build: (docker login ghcr.io first)
     restart: unless-stopped
     command:
       - -port=/dev/ttyUSB0          # or tcp://192.168.1.50:502 (transparent RS485 gateway, raw RTU)

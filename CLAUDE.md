@@ -129,6 +129,9 @@ Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
   /api/sim/sensorbox?offline=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=&access=
   (access=on|pause|off as if changed on the node).
+- .github/workflows/docker.yml: go vet + test, then buildx amd64/arm64/arm/v7 to
+  ghcr.io/fjgalesloot/smartevse-master (main → :latest/:main/:sha-x, tag v1.2.3 → :1.2.3/:1.2;
+  PRs build only; docs/examples-only changes skip).
 - Dockerfile: buildx multi-arch, CGO_ENABLED=0, distroless static nonroot (needs
   group_add with the tty device gid). examples/evcc.yaml uses Go templates in uri
   (`{{.enable}}`, `{{.maxcurrent}}`, `{{.maxcurrentmillis}}`) per docs.evcc.io
