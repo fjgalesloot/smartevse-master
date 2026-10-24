@@ -1,4 +1,4 @@
-# Power sharing: evse-master vs. SmartEVSE-3 firmware master
+# Power sharing: smartevse-master vs. SmartEVSE-3 firmware master
 
 How this master divides the available current between the nodes, and how that
 compares with the master in the SmartEVSE-3 firmware.
@@ -117,7 +117,7 @@ current moves from one car to another.
   - **evcc wins:** a change made on the node (button, web UI, MQTT) is undone in
     the next cycle.
   - **Re-enabling:** the master writes ON; the node goes B1 → COMM_B → … → C, about 6 s.
-  - **The setting is stored on the node**, so a node stays paused if evse-master
+  - **The setting is stored on the node**, so a node stays paused if smartevse-master
     stops; it then needs the button or web UI to charge on its own.
 - **Mains measurement lost:** the master writes `CT_NOCOMM` to the nodes and stops
   broadcasting, as in the firmware. It approves nothing during the fault, whereas

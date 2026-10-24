@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/floris/evse-master/smartevse"
+	"github.com/fjgalesloot/smartevse-master/smartevse"
 )
 
 func newTestAPI(t *testing.T) (http.Handler, *smartevse.Master) {

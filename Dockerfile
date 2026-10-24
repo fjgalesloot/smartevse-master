@@ -6,10 +6,10 @@ COPY go.mod ./
 COPY smartevse ./smartevse
 COPY cmd ./cmd
 RUN GOARM=${TARGETVARIANT#v} CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /evse-master ./cmd/evse-master
+    go build -trimpath -ldflags="-s -w" -o /smartevse-master ./cmd/smartevse-master
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /evse-master /evse-master
+COPY --from=build /smartevse-master /smartevse-master
 EXPOSE 7090
 # Runs as uid 65532: give it the serial device's group (see examples/docker-compose.yaml).
-ENTRYPOINT ["/evse-master"]
+ENTRYPOINT ["/smartevse-master"]

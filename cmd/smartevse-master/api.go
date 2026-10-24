@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/floris/evse-master/smartevse"
+	"github.com/fjgalesloot/smartevse-master/smartevse"
 )
 
 type api struct {

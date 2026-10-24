@@ -6,11 +6,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/floris/evse-master/smartevse"
+	"github.com/fjgalesloot/smartevse-master/smartevse"
 )
 
 // sniffBus prints every frame on the bus with its time since the previous one.
-// On a bus with only slaves (evse-master stopped) it should print nothing.
+// On a bus with only slaves (smartevse-master stopped) it should print nothing.
 func sniffBus(ctx context.Context, port string) error {
 	fmt.Fprintf(os.Stderr, "sniffing %s (never transmits), ctrl-c to stop\n", port)
 	var (

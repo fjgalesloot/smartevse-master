@@ -1,4 +1,4 @@
-// Command evse-master is an external load-balancing master for SmartEVSE-3
+// Command smartevse-master is an external load-balancing master for SmartEVSE-3
 // units configured as nodes, with an HTTP API for evcc.
 package main
 
@@ -16,12 +16,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/floris/evse-master/smartevse"
+	"github.com/fjgalesloot/smartevse-master/smartevse"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "evse-master:", err)
+		fmt.Fprintln(os.Stderr, "smartevse-master:", err)
 		os.Exit(1)
 	}
 }

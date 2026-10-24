@@ -1,4 +1,4 @@
 # Salesforce CLI/plugin cache (not part of this project)
 .sf/
 # local builds
-/evse-master
+/smartevse-master

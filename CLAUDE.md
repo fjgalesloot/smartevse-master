@@ -1,4 +1,4 @@
-# evse-master
+# smartevse-master
 
 External SmartEVSE-3 load-balancing master, so evcc can control two SmartEVSE-3
 units (Stegen firmware v3.11.2) configured as Node 1 / Node 2, while MaxMains
@@ -118,7 +118,7 @@ if that car then ramps up, the overload lasts ≤ 1 cycle. While the Sensorbox d
 answer, currents are held (not raised) until -stale (default 11 s = COMM_TIMEOUT)
 stops all nodes; a household load change in that window goes unseen until then.
 
-Done (`cmd/evse-master`, Dockerfile, `examples/`):
+Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
   -nodes id:maxA[:host], -stale (11 s), -ct200, -default-enabled (default false), -sim, -log-level), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
@@ -134,7 +134,7 @@ Done (`cmd/evse-master`, Dockerfile, `examples/`):
   (`{{.enable}}`, `{{.maxcurrent}}`, `{{.maxcurrentmillis}}`) per docs.evcc.io
   /en/reference/plugins and /en/user-defined-devices.
 
-Verified: real evcc (template rendering, resync after an evse-master restart),
+Verified: real evcc (template rendering, resync after a smartevse-master restart),
 real hardware (node timing, pause, EV meters, 1P/3P), Docker build (docker8).
 
 TODO:

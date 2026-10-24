@@ -1,5 +1,5 @@
 services:
-  evse-master:
+  smartevse-master:
     build: ..
     restart: unless-stopped
     command:
@@ -30,7 +30,7 @@ services:
     container_name: evcc
     restart: unless-stopped
     depends_on:
-      - evse-master
+      - smartevse-master
     volumes:
       - evcc-data:/root/.evcc        # evcc database (settings, sessions)
     ports:
