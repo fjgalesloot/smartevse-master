@@ -41,14 +41,21 @@ func run() error {
 		simulate       = flag.Bool("sim", false, "run against a simulated bus in real time (no hardware)")
 		sniff          = flag.Bool("sniff", false, "only listen on -port and print all traffic, never transmit (diagnostics)")
 		logLevel       = flag.String("log-level", "info", "debug, info, warn or error")
+		showVersion    = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(buildVersion())
+		return nil
+	}
 
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
 		return fmt.Errorf("log level: %w", err)
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	log.Info("smartevse-master", "version", buildVersion())
 
 	nodeCfg, err := parseNodes(*nodes)
 	if err != nil {

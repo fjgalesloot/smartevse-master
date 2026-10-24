@@ -47,8 +47,13 @@ func (a *api) logRequests(h http.Handler) http.Handler {
 	})
 }
 
+type stateInfo struct {
+	Version string `json:"version"`
+	smartevse.Snapshot
+}
+
 func (a *api) state(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, a.m.Snapshot())
+	writeJSON(w, stateInfo{buildVersion(), a.m.Snapshot()})
 }
 
 // healthz fails when the control loop is stuck or the mains measurement is lost.

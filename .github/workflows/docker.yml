@@ -1,8 +1,9 @@
 # Tests, then builds the multi-arch image and pushes it to
 # ghcr.io/fjgalesloot/smartevse-master:
 #   push to main  -> :latest, :main, :sha-<short>
-#   tag v1.2.3    -> :1.2.3, :1.2
+#   tag v1.2.3    -> :1.2.3, :1.2  (release: git tag v1.2.3 && git push origin v1.2.3)
 #   pull request  -> build only, no push
+# The binary reports git describe as its version (-version, startup log, /api/state).
 name: docker
 
 on:
@@ -38,6 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # tags for git describe
+      # v1.2.3 on a tag, v1.2.3-4-gabc1234 after it, abc1234 before the first tag
+      - id: version
+        run: echo "version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
       # The Dockerfile cross-compiles in the build stage and the final stage has
       # no RUN, so no QEMU is needed for the non-amd64 platforms.
       - uses: docker/setup-buildx-action@v4
@@ -62,6 +68,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: ${{ github.event_name != 'pull_request' }}
+          build-args: VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

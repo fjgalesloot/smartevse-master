@@ -131,7 +131,9 @@ Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
   (access=on|pause|off as if changed on the node).
 - .github/workflows/docker.yml: go vet + test, then buildx amd64/arm64/arm/v7 to
   ghcr.io/fjgalesloot/smartevse-master (main → :latest/:main/:sha-x, tag v1.2.3 → :1.2.3/:1.2;
-  PRs build only; docs/examples-only changes skip).
+  PRs build only; docs/examples-only changes skip). Version = git describe, passed as
+  build arg VERSION → -X main.version (version.go; local go build: dev-<rev>), shown by
+  -version, the startup log and /api/state .version. Release: push a tag v1.2.3.
 - Dockerfile: buildx multi-arch, CGO_ENABLED=0, distroless static nonroot (needs
   group_add with the tty device gid). examples/evcc.yaml uses Go templates in uri
   (`{{.enable}}`, `{{.maxcurrent}}`, `{{.maxcurrentmillis}}`) per docs.evcc.io
