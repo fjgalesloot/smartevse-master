@@ -193,10 +193,12 @@ type simNodeInfo struct {
 }
 
 type simInfo struct {
-	MainsA           [3]float64    `json:"mainsA"` // real, incl. EVs
-	HouseA           [3]float64    `json:"houseA"`
-	SensorboxOffline bool          `json:"sensorboxOffline"`
-	Nodes            []simNodeInfo `json:"nodes"`
+	MainsA              [3]float64    `json:"mainsA"` // real, incl. EVs
+	HouseA              [3]float64    `json:"houseA"`
+	SensorboxOffline    bool          `json:"sensorboxOffline"`
+	SensorboxWebOffline bool          `json:"sensorboxWebOffline"`
+	SensorboxP1Lost     bool          `json:"sensorboxP1Lost"`
+	Nodes               []simNodeInfo `json:"nodes"`
 }
 
 func (a *api) simState(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +209,7 @@ func (a *api) simInfo() simInfo {
 	var s simInfo
 	a.sim.Do(func() {
 		s.HouseA, s.SensorboxOffline = a.sim.House, a.sim.SensorboxOffline
+		s.SensorboxWebOffline, s.SensorboxP1Lost = a.sim.SensorboxWebOffline, a.sim.SensorboxP1Lost
 		for id := 1; id <= 7; id++ {
 			n := a.sim.Node(id)
 			if n == nil {
@@ -245,14 +248,32 @@ func (a *api) simHouse(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, a.simInfo())
 }
 
-// simSensorbox takes the Sensorbox off the bus: ?offline=true.
+// simSensorbox takes the Sensorbox off the bus (?offline=true), its WiFi
+// REST API off the network (?weboffline=true) or its smart meter away
+// (?p1lost=true). All parameters are optional.
 func (a *api) simSensorbox(w http.ResponseWriter, r *http.Request) {
-	v, err := strconv.ParseBool(r.URL.Query().Get("offline"))
-	if err != nil {
-		http.Error(w, "offline: want true or false", http.StatusBadRequest)
-		return
+	q := r.URL.Query()
+	set := map[string]*bool{
+		"offline":    &a.sim.SensorboxOffline,
+		"weboffline": &a.sim.SensorboxWebOffline,
+		"p1lost":     &a.sim.SensorboxP1Lost,
 	}
-	a.sim.Do(func() { a.sim.SensorboxOffline = v })
+	vals := map[string]bool{}
+	for k := range set {
+		if s := q.Get(k); s != "" {
+			v, err := strconv.ParseBool(s)
+			if err != nil {
+				http.Error(w, k+": want true or false", http.StatusBadRequest)
+				return
+			}
+			vals[k] = v
+		}
+	}
+	a.sim.Do(func() {
+		for k, v := range vals {
+			*set[k] = v
+		}
+	})
 	writeJSON(w, a.simInfo())
 }
 

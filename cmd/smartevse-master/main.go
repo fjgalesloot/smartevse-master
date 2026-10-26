@@ -37,6 +37,7 @@ func run() error {
 		nodes          = flag.String("nodes", "1:16,2:16", "nodes as id:maxA[:host], comma separated (id = Load Balancing setting 1..7, host = WiFi address for 1P/3P switching)")
 		stale          = flag.Duration("stale", 11*time.Second, "mains data older than this stops all nodes (firmware: 11s)")
 		ct200          = flag.Bool("ct200", false, "Sensorbox CTs are 200A:50mA")
+		sensorboxHost  = flag.String("sensorbox-host", "", "Sensorbox-2 WiFi address: mains from its REST API while it does not answer on the bus")
 		defaultEnabled = flag.Bool("default-enabled", false, "nodes may charge before evcc enabled them")
 		simulate       = flag.Bool("sim", false, "run against a simulated bus in real time (no hardware)")
 		sniff          = flag.Bool("sniff", false, "only listen on -port and print all traffic, never transmit (diagnostics)")
@@ -69,6 +70,7 @@ func run() error {
 		Stale:          *stale,
 		CT200A:         *ct200,
 		DefaultEnabled: *defaultEnabled,
+		SensorboxHost:  *sensorboxHost,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -87,6 +89,9 @@ func run() error {
 		for i, nc := range nodeCfg {
 			ids[i] = nc.ID
 			cfg.Nodes[i].Host = fmt.Sprintf("node%d", nc.ID) // the sim's REST API
+		}
+		if cfg.SensorboxHost != "" {
+			cfg.SensorboxHost = "sensorbox"
 		}
 		sim = smartevse.NewSim(ids...)
 		sim.House = [3]float64{5, 5, 5}
