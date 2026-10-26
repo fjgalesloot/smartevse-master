@@ -41,6 +41,17 @@ stays enforced outside evcc. Goal: later port `smartevse/` into evcc as a charge
   big-endian. No power or energy registers (PIC and ESP firmware, Sensorbox-2 repo).
   P1 amps = (21.7.0 - 22.7.0) / 32.7.0, so V × I is the meter's per-phase power
   exactly; a missing P1 voltage reads 1 V. CT amps = real power / nominal V.
+  Only answers requests, never sends on its own (ESP32 eModbus server; the PIC's
+  periodic output goes to the ESP32 over an internal UART).
+- Sensorbox-2 WiFi REST API (ESP32 main.cpp handle_URI): GET /settings,
+  phase_currents.L1-L3 = MainsMeterIrms in 0.1 A (P1, else CT; not doubled for 200 A
+  CTs and no hint which), copied every ~2 s (Timer2S) while data is valid, else frozen;
+  phase_currents.last_data_update = time(NULL) of the last P1 telegram / CT reading
+  (clock may be unset), so only a change of it means new data. No voltages.
+- Sensorbox-2 RS485 (schematic v1.10): SN65HVD72 straight on A/B, no isolation; the
+  bus connector carries A, B, 12 V and GND. 12 V without GND returns the supply
+  current through the transceiver's A/B pins: suspected of breaking one (ESP32 and P1
+  kept running, bus answer 0 bytes).
 - EV meter setting: status byte 13 (reg 0x0006) = config changed → FC04 reg 0x0108,
   2 regs (type = byte 1, address = byte 3), then FC06 reg 0x0006 = 0 to clear the flag.
 - Contactor 2 (1P/3P, `EnableC2`) is NOT reachable over Modbus: MENU_C2 (item 41) lies
@@ -83,12 +94,20 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   phases (evcc's smart-evse driver does the same with whenDisabled). Hold ends after
   30 s at most. GetPhases reads the setting once (again after the node was offline)
 - nodeweb.go: REST client for enable_C2 (Connection: close, retries on 503)
+- sensorboxweb.go: optional mains fallback (Config.SensorboxHost) from the Sensorbox
+  REST API, polled every 1 s in the background (Run). The first answer only sets the
+  stamp baseline; a changed stamp is a new reading, dated 2 s before it was seen
+  (Timer2S lag). Used only in cycles where the bus read failed and only if newer than
+  the last reading used; Source "REST", power = I × 230 V. Refused with CT200A. The
+  per-cycle bus warning drops to debug while on the web API; switch both ways logged once
+- sim.go: Sensorbox REST API at host "sensorbox" (SensorboxWebOffline, SensorboxP1Lost
+  freezes its stamp and values and clears the Modbus P1 flag)
 - sim.go: simulated bus (Sensorbox + nodes + an Eastron3P EV meter per node), node
   behaviour ported from the firmware state machine incl. STATUS_ERROR handling,
   ChargeDelay, COMM_TIMEOUT, access (setAccess), EV meter listening and COMM_EVTIMEOUT;
   contactor 2 (switched on entering C) and the node REST API as http.RoundTripper
   (host "node<id>", WebBusy for 503s)
-- scenario_test.go: 22 scenarios; soak_test.go: 20 seeds × 2 h random events;
+- scenario_test.go: 24 scenarios; soak_test.go: 20 seeds × 2 h random events;
   evmeter_test.go: request frames per type, decode vectors (incl. one from the real bus)
 
 Deliberate deviations from the firmware (all found by the simulator):
@@ -117,17 +136,19 @@ A car drawing less than its PWM leaves "phantom" headroom that another node may 
 if that car then ramps up, the overload lasts ≤ 1 cycle. While the Sensorbox does not
 answer, currents are held (not raised) until -stale (default 11 s = COMM_TIMEOUT)
 stops all nodes; a household load change in that window goes unseen until then.
+With -sensorbox-host the REST API bridges that window; its readings are up to ~3 s
+old (Timer2S + poll), so a load step is corrected a cycle later than over the bus.
 
 Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
-  -nodes id:maxA[:host], -stale (11 s), -ct200, -default-enabled (default false), -sim, -log-level), SIGTERM
+  -nodes id:maxA[:host], -stale (11 s), -ct200, -sensorbox-host, -default-enabled (default false), -sim, -log-level), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
 - api.go: GET /api/state (evcc grid meter: .powerW, .mainsA, error on .fault), GET /api/nodes/{id} (evcc jq .status / .enabled /
   .meter.powerW / .meter.energyKWh; .access on/pause/off; status "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
   POST /api/nodes/{id}/current?value= (float), GET|POST /api/nodes/{id}/phases[?value=1|3]
   (evcc getphases jq .phases / phases1p3p; 400 without host, 502 node error), GET /healthz (503 on stalled loop or
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
-  /api/sim/sensorbox?offline=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=&access=
+  /api/sim/sensorbox?offline=&weboffline=&p1lost=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=&access=
   (access=on|pause|off as if changed on the node).
 - .github/workflows/docker.yml: go vet + test, then buildx amd64/arm64/arm/v7 to
   ghcr.io/fjgalesloot/smartevse-master (main → :latest/:main/:sha-x, tag v1.2.3 → :1.2.3/:1.2;

@@ -7,6 +7,7 @@ services:
       - -port=/dev/ttyUSB0          # or tcp://192.168.1.50:502 (transparent RS485 gateway, raw RTU)
       - -max-mains=25
       - -nodes=1:16:smartevse1,2:16:smartevse2   # id:maxA:host, host = node WiFi for 1P/3P switching
+      # - -sensorbox-host=sensorbox  # mains from the Sensorbox WiFi REST API while it does not answer on the bus
       - -log-level=debug
       # - -sniff
       # - -sim                       # no hardware: simulated Sensorbox + nodes (see evcc.yaml)
@@ -19,6 +20,7 @@ services:
     extra_hosts:                     # the nodes' WiFi, for 1P/3P switching
       smartevse1: 172.29.1.40
       smartevse2: 172.29.1.41
+      # sensorbox: 172.29.1.42       # with -sensorbox-host=sensorbox
   evcc:
     # evcc.yaml is baked into the image: the build context is uploaded to the
     # daemon, so this also works with a remote docker context (bind mounts would

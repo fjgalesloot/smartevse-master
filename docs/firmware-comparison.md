@@ -142,7 +142,7 @@ current moves from one car to another.
 | CircuitMeter | A separate sub-panel meter with its own `Baseload_Circuit` | Here `MaxCircuit` only caps the sum of the EVSE currents, as the firmware does without a circuit meter. |
 | GridRelay | `GridRelayMaxSumMains` while the relay is open (main.cpp:1035–1038) | Not ported. |
 | Home battery correction | Battery current subtracted from the mains readings (`CalcIsum`, main.cpp:2864) | Not ported. |
-| Mains meter types | Any Modbus kWh meter, API, HomeWizard | Sensorbox-2 only. |
+| Mains meter types | Any Modbus kWh meter, API, HomeWizard | Sensorbox-2 only; optionally its WiFi REST API as fallback while it does not answer on the bus (`-sensorbox-host`). |
 | Mode change from a node's display | The whole system switches to the node's mode (`NodeNewMode`, main.cpp:1706, 1869) | Here the node is switched back to Smart. |
 | The master's own EVSE (slot 0) | ChargeCurrent, OverrideCurrent, OCPP limit | This master has no charger; slot 0 stays in state A. |
 

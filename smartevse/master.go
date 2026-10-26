@@ -27,6 +27,7 @@ type Config struct {
 	Stale          time.Duration // mains data older than this = fault; default 11 s (firmware COMM_TIMEOUT)
 	CT200A         bool          // Sensorbox CTs are 200A:50mA
 	DefaultEnabled bool          // nodes may charge before evcc sent anything
+	SensorboxHost  string        // Sensorbox-2 WiFi REST API, used while it does not answer on the bus; "" = none
 }
 
 // Interval is the control cycle, same as the firmware.
@@ -87,9 +88,11 @@ type Master struct {
 	fault   bool
 	cycles  uint64
 	cycleAt time.Time
-	meterID int // node whose EV meter was polled last
+	meterID int  // node whose EV meter was polled last
+	viaWeb  bool // mains currently from the Sensorbox REST API
 
-	web *nodeWeb // not locked by mu: used outside it
+	web   *nodeWeb      // not locked by mu: used outside it
+	sbWeb *sensorboxWeb // nil = no REST fallback; has its own lock
 }
 
 // NewMaster validates the config and creates a master.
@@ -135,6 +138,14 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 			host: nc.Host, c2: -1,
 		}
 	}
+	if cfg.SensorboxHost != "" {
+		// The REST API does not say whether its currents come from P1 or the
+		// CTs, so 200 A CT readings could not be doubled: they would read half.
+		if cfg.CT200A {
+			return nil, fmt.Errorf("sensorbox web api cannot be used with 200A CTs")
+		}
+		m.sbWeb = newSensorboxWeb(cfg.SensorboxHost, log)
+	}
 	return m, nil
 }
 
@@ -146,10 +157,16 @@ func (m *Master) SetClock(now func() time.Time) { m.now = now }
 func (m *Master) SetHTTPTransport(rt http.RoundTripper) {
 	m.web.client.Transport = rt
 	m.web.pause = 0
+	if m.sbWeb != nil {
+		m.sbWeb.client.Transport = rt
+	}
 }
 
 // Run executes the control cycle every Interval until ctx is done.
 func (m *Master) Run(ctx context.Context) {
+	if m.sbWeb != nil {
+		go m.sbWeb.run(ctx, m.now)
+	}
 	t := time.NewTicker(Interval)
 	defer t.Stop()
 	for {
@@ -181,12 +198,22 @@ func (m *Master) control() {
 	fresh := err == nil
 	if fresh {
 		m.mains, m.mainsAt = mains, now
+		if m.viaWeb {
+			m.log.Info("mains from the sensorbox on the bus again")
+			m.viaWeb = false
+		}
 	} else {
-		m.warn("sensorbox read failed", err)
+		fresh = m.mainsFromWeb()
+		if m.viaWeb {
+			m.log.Debug("sensorbox read failed", "err", err) // expected while on the web api
+		} else {
+			m.warn("sensorbox read failed", err)
+		}
 	}
 	wasFault := m.fault
 	m.fault = m.mainsAt.IsZero() || now.Sub(m.mainsAt) > m.cfg.Stale
 	if m.fault && !wasFault {
+		m.viaWeb = false // web api stale too: log bus failures again
 		m.log.Error("mains measurement lost: stopping all nodes", "last", m.mainsAt)
 	} else if !m.fault && wasFault {
 		m.log.Info("mains measurement restored")
@@ -286,6 +313,24 @@ func (m *Master) logCycle(imeas int, fresh bool) {
 		args = append(args, fmt.Sprintf("node%d", n.id), float64(m.bal.Balanced[n.slot()])/10)
 	}
 	m.log.Debug("cycle", args...)
+}
+
+// mainsFromWeb takes a new measurement from the Sensorbox REST API, if there
+// is one newer than the last measurement used.
+func (m *Master) mainsFromWeb() bool {
+	if m.sbWeb == nil {
+		return false
+	}
+	mains, at, ok := m.sbWeb.latest()
+	if !ok || !at.After(m.mainsAt) {
+		return false
+	}
+	m.mains, m.mainsAt = mains, at
+	if !m.viaWeb {
+		m.log.Warn("sensorbox not answering on the bus: mains from its web api")
+		m.viaWeb = true
+	}
+	return true
 }
 
 // warn logs a failed bus request; a lost bus is logged once by the bus itself.

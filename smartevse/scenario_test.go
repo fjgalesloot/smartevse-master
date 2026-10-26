@@ -59,10 +59,19 @@ func newHarness(t *testing.T, mutate ...func(*Config)) *harness {
 func (h *harness) run(d time.Duration) {
 	h.t.Helper()
 	for elapsed := time.Duration(0); elapsed < d; elapsed += Interval {
-		h.sim.Advance(Interval)
-		h.m.Cycle()
-		h.check()
+		h.step()
 	}
+}
+
+// step advances one cycle: the Sensorbox web api is polled in between, as
+// its background poller would.
+func (h *harness) step() {
+	h.sim.Advance(Interval)
+	if h.m.sbWeb != nil {
+		h.m.sbWeb.poll(h.sim.Now())
+	}
+	h.m.Cycle()
+	h.check()
 }
 
 // runUntil runs until cond is true, failing after max.
@@ -72,9 +81,7 @@ func (h *harness) runUntil(max time.Duration, what string, cond func() bool) tim
 		if cond() {
 			return elapsed
 		}
-		h.sim.Advance(Interval)
-		h.m.Cycle()
-		h.check()
+		h.step()
 	}
 	h.t.Fatalf("%s: not reached within %v\n%s", what, max, h.dump())
 	return 0
@@ -445,6 +452,73 @@ func TestScenarioSensorboxLost(t *testing.T) {
 
 	h.sim.SensorboxOffline = false
 	h.runUntil(90*time.Second, "both resumed", func() bool { return h.charging(1)() && h.charging(2)() })
+}
+
+// Sensorbox stops answering on the bus while its WiFi keeps working: the
+// master balances on the REST API instead, still within MaxMains. When the
+// Sensorbox also loses its meter, the REST stamp freezes and the nodes stop
+// after Stale as without the fallback.
+func TestScenarioSensorboxWebFallback(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.SensorboxHost = "sensorbox" })
+	h.plugIn(1)
+	h.plugIn(2)
+	h.runUntil(20*time.Second, "both charging", func() bool { return h.charging(1)() && h.charging(2)() })
+
+	h.sim.SensorboxOffline = true
+	h.run(60 * time.Second)
+	if s := h.m.Snapshot(); s.Fault || s.Source != "REST" {
+		t.Fatalf("fault=%v source=%q, want web api mains\n%s", s.Fault, s.Source, h.dump())
+	}
+	if !h.charging(1)() || !h.charging(2)() {
+		t.Fatalf("nodes stopped on web api mains\n%s", h.dump())
+	}
+
+	// a household load must still be balanced out
+	h.sim.House = [3]float64{10, 10, 10}
+	h.run(30 * time.Second)
+	if over := h.sim.MaxPhase() - float64(h.cfg.MaxMains); over > 0.05 {
+		t.Fatalf("mains %.1f A over MaxMains after 30 s\n%s", over, h.dump())
+	}
+	if !h.charging(1)() || !h.charging(2)() || h.amps(1)+h.amps(2) > 15.05 {
+		t.Fatalf("nodes not reduced to share 15 A\n%s", h.dump())
+	}
+	if h.longest > 2*Interval {
+		t.Errorf("overload lasted %v (peak %.1f A)\n%s", h.longest, h.peakOver, h.peakAt)
+	}
+
+	h.sim.SensorboxP1Lost = true
+	took := h.runUntil(16*time.Second, "both stopped", func() bool { return h.amps(1) == 0 && h.amps(2) == 0 })
+	t.Logf("nodes stopped %v after P1 loss", took)
+	if !h.m.Snapshot().Fault {
+		t.Errorf("master should report fault")
+	}
+
+	h.sim.SensorboxP1Lost = false
+	h.runUntil(90*time.Second, "both resumed", func() bool { return h.charging(1)() && h.charging(2)() })
+	if s := h.m.Snapshot(); s.Source != "REST" {
+		t.Errorf("source %q, want REST", s.Source)
+	}
+
+	h.sim.SensorboxOffline = false
+	h.run(4 * time.Second)
+	if s := h.m.Snapshot(); s.Source != "P1" {
+		t.Errorf("source %q after the bus recovered, want P1", s.Source)
+	}
+}
+
+// Sensorbox gone on the bus and over WiFi: nodes stop after Stale.
+func TestScenarioSensorboxWebAlsoLost(t *testing.T) {
+	h := newHarness(t, func(c *Config) { c.SensorboxHost = "sensorbox" })
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "charging", h.charging(1))
+
+	h.sim.SensorboxOffline = true
+	h.sim.SensorboxWebOffline = true
+	took := h.runUntil(16*time.Second, "stopped", func() bool { return h.amps(1) == 0 })
+	t.Logf("node stopped %v after losing both", took)
+	if !h.m.Snapshot().Fault {
+		t.Errorf("master should report fault")
+	}
 }
 
 // The master process dies: nodes must stop by themselves (CT_NOCOMM after ~11 s).

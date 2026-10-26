@@ -25,9 +25,16 @@ type Sim struct {
 	rx  []byte
 	now time.Time
 
-	House            [3]float64 // household load per phase in A (negative = export)
-	SensorboxOffline bool
-	Nodes            map[byte]*SimNode // by Modbus address
+	House               [3]float64        // household load per phase in A (negative = export)
+	SensorboxOffline    bool              // not answering on the bus
+	SensorboxWebOffline bool              // WiFi REST API (host "sensorbox") not reachable
+	SensorboxP1Lost     bool              // no telegrams from the smart meter
+	Nodes               map[byte]*SimNode // by Modbus address
+
+	// Sensorbox REST API: MainsMeterIrms (0.1 A) and the time of the last
+	// measurement, both frozen while P1 is lost.
+	sbIrms  [3]int
+	sbStamp int64
 
 	// Log records every frame the master sent (for assertions).
 	Log []SimFrame
@@ -138,6 +145,12 @@ func (s *Sim) Advance(d time.Duration) {
 				n.acc -= time.Second
 				n.tick1s()
 			}
+		}
+		if !s.SensorboxP1Lost {
+			for i, a := range s.mainsLocked() {
+				s.sbIrms[i] = int(math.Round(a * 10))
+			}
+			s.sbStamp = s.now.Unix()
 		}
 	}
 }
@@ -502,6 +515,9 @@ func (s *Sim) sensorboxRegs(count uint16) []uint16 {
 	regs := make([]uint16, 20)
 	regs[0] = 0x0014
 	regs[1] = 0x3280 // DSMR 5.0, P1 present
+	if s.SensorboxP1Lost {
+		regs[1] = 0x3200
+	}
 	m := s.mainsLocked()
 	volts := [3]float32{231.4, 229.8, 232.1}
 	for i := 0; i < 3; i++ {
@@ -539,10 +555,14 @@ func (s *Sim) Close() error { return nil }
 
 // RoundTrip answers HTTP requests to the nodes' REST API at host "node<id>",
 // so the Sim can serve as the Master's HTTP transport (SetHTTPTransport). Only
-// GET /settings and POST /settings?enable_C2= are simulated.
+// GET /settings and POST /settings?enable_C2= are simulated. Host "sensorbox"
+// is the Sensorbox-2 REST API (GET /settings, phase_currents only).
 func (s *Sim) RoundTrip(r *http.Request) (*http.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if r.URL.Host == "sensorbox" {
+		return s.sensorboxWeb(r)
+	}
 	var id int
 	_, err := fmt.Sscanf(r.URL.Host, "node%d", &id)
 	n := s.Node(id)
@@ -564,6 +584,23 @@ func (s *Sim) RoundTrip(r *http.Request) (*http.Response, error) {
 	body, _ := json.Marshal(map[string]any{
 		"evse":     map[string]any{"nrofphases": n.NrOfPhases},
 		"settings": map[string]any{"enable_C2": c2Names[n.EnableC2]},
+	})
+	return simResponse(r, http.StatusOK, string(body)), nil
+}
+
+func (s *Sim) sensorboxWeb(r *http.Request) (*http.Response, error) {
+	if s.SensorboxWebOffline {
+		return nil, fmt.Errorf("sim: sensorbox web api not reachable")
+	}
+	if r.URL.Path != "/settings" || r.Method != http.MethodGet {
+		return simResponse(r, http.StatusNotFound, "not found"), nil
+	}
+	l := s.sbIrms
+	body, _ := json.Marshal(map[string]any{
+		"settings": map[string]any{"mains_meter": "Sensorbox"},
+		"phase_currents": map[string]any{
+			"TOTAL": l[0] + l[1] + l[2], "L1": l[0], "L2": l[1], "L3": l[2], "last_data_update": s.sbStamp,
+		},
 	})
 	return simResponse(r, http.StatusOK, string(body)), nil
 }
