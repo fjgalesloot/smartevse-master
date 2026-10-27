@@ -2,3 +2,5 @@
 .sf/
 # local builds
 /smartevse-master
+# local logs
+/log/
