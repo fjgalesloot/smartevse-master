@@ -45,6 +45,7 @@ type node struct {
 	access  int // reg 0x0005, as read or last written
 	enabled bool
 	limit   int // 0.1 A, from evcc
+	logged  int // 0.1 A, current broadcast to the node when last logged
 
 	cfgChanged bool // EV meter setting must be (re)read: at start, back online, or flagged by the node
 	meter      evMeter
@@ -263,7 +264,11 @@ func (m *Master) control() {
 		if vals == nil {
 			continue
 		}
-		m.log.Debug("node update", "node", n.id, "state", StateName(n.state), "write", vals)
+		args := []any{"node", n.id, "from", StateName(n.state), "to", StateName(int(vals[0])), "errors", vals[1]}
+		if len(vals) > 3 {
+			args = append(args, "mode", vals[3])
+		}
+		m.log.Info("node state written", args...)
 		if err := m.bus.WriteMultiple(n.addr, regNodeStatus, vals); err != nil {
 			m.warn("node write failed", err, "node", n.id)
 		}
@@ -299,7 +304,54 @@ func (m *Master) control() {
 	}
 	if err := m.bus.WriteMultiple(BroadcastAddr, regBroadcastLoad, vals); err != nil {
 		m.warn("broadcast failed", err)
+	} else {
+		m.logCurrents()
 	}
+}
+
+// logStep is the change since the last log (0.1 A) above which a current set
+// by the balancer is logged; it moves the current nearly every cycle.
+const logStep = 5
+
+// logCurrents logs the nodes whose broadcast current (A) changed, with the reason.
+func (m *Master) logCurrents() {
+	for _, n := range m.sortedNodes() {
+		b := m.bal.Balanced[n.slot()]
+		if b == n.logged {
+			continue
+		}
+		reason := m.currentReason(n, b)
+		if reason == "balancer" && abs(b-n.logged) <= logStep {
+			continue
+		}
+		m.log.Info("node current", "node", n.id, "from", float64(n.logged)/10, "to", float64(b)/10, "reason", reason)
+		n.logged = b
+	}
+}
+
+// currentReason tells why node n gets current b (0.1 A).
+func (m *Master) currentReason(n *node, b int) string {
+	switch {
+	case n.online == 0:
+		return "offline"
+	case !n.enabled:
+		return "evcc disabled"
+	case !n.hold.IsZero():
+		return "phase switch"
+	case n.limit < m.cfg.MinCurrent*10:
+		return "evcc limit below min current"
+	case b == 0:
+		return "not charging"
+	case n.logged == 0:
+		return "start"
+	case b == n.limit:
+		return "evcc limit"
+	case b == n.maxA*10:
+		return "node max"
+	case b == n.capA*10:
+		return "configured max"
+	}
+	return "balancer"
 }
 
 // logCycle logs the mains measurement (A) and the current (A) broadcast to each node.
@@ -630,7 +682,7 @@ func (h *Node) Phases1p3p(phases int) error {
 	if restart {
 		n.hold = m.now()
 	}
-	m.log.Info("phases set", "node", h.id, "phases", phases, "restart", restart)
+	m.log.Info("node phases set", "node", h.id, "phases", phases, "restart", restart)
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -102,7 +103,7 @@ func (a *api) nodeEnable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	a.log.Info("enable", "node", r.PathValue("id"), "value", v)
+	a.log.Info("evcc enable", "node", r.PathValue("id"), "enabled", v, "remote", remote(r))
 	writeJSON(w, n.Info())
 }
 
@@ -120,8 +121,17 @@ func (a *api) nodeCurrent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	a.log.Info("current", "node", r.PathValue("id"), "value", v)
+	a.log.Info("evcc current", "node", r.PathValue("id"), "limitA", v, "remote", remote(r))
 	writeJSON(w, n.Info())
+}
+
+// remote is the client's address without port, to tell evcc from other callers.
+func remote(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 type phasesInfo struct {
@@ -162,7 +172,9 @@ func (a *api) nodeSetPhases(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "value: want 1 or 3", http.StatusBadRequest)
 		return
 	}
+	a.log.Info("evcc phases", "node", r.PathValue("id"), "phases", v, "remote", remote(r))
 	if err := n.Phases1p3p(v); err != nil {
+		a.log.Warn("node phases failed", "node", r.PathValue("id"), "phases", v, "err", err)
 		http.Error(w, err.Error(), phasesErrCode(err))
 		return
 	}

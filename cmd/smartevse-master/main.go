@@ -55,7 +55,7 @@ func run() error {
 	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
 		return fmt.Errorf("log level: %w", err)
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	log := slog.New(newLogHandler(os.Stderr, level))
 	log.Info("smartevse-master", "version", buildVersion())
 
 	nodeCfg, err := parseNodes(*nodes)
