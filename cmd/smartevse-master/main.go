@@ -39,6 +39,12 @@ func run() error {
 		ct200          = flag.Bool("ct200", false, "Sensorbox CTs are 200A:50mA")
 		sensorboxHost  = flag.String("sensorbox-host", "", "Sensorbox-2 WiFi address: mains from its REST API while it does not answer on the bus")
 		defaultEnabled = flag.Bool("default-enabled", false, "nodes may charge before evcc enabled them")
+		interFrame     = flag.Duration("inter-frame-delay", smartevse.DefaultInterFrameDelay, "minimum silence between frames on the bus (at least 3.5 characters)")
+		turnaround     = flag.Duration("broadcast-turnaround", smartevse.DefaultBroadcastTurnaround, "extra silence after a broadcast, so the nodes can process it")
+		meterEvery     = flag.Int("evmeter-every", 2, "read each node's EV meter every N cycles (round robin)")
+		meterTimeout   = flag.Duration("evmeter-timeout", 0, "EV meter response timeout, 0 = from the answer size and measured latency (at least -timeout)")
+		meterStale     = flag.Int("evmeter-stale-after", 3, "failed EV meter reads in a row before its readings are stale")
+		trace          = flag.Bool("bus-trace", false, "log every bus frame with its timing (diagnostics)")
 		simulate       = flag.Bool("sim", false, "run against a simulated bus in real time (no hardware)")
 		sniff          = flag.Bool("sniff", false, "only listen on -port and print all traffic, never transmit (diagnostics)")
 		logLevel       = flag.String("log-level", "info", "debug, info, warn or error")
@@ -56,6 +62,7 @@ func run() error {
 		return fmt.Errorf("log level: %w", err)
 	}
 	log := slog.New(newLogHandler(os.Stderr, level))
+	slog.SetDefault(log)
 	log.Info("smartevse-master", "version", buildVersion())
 
 	nodeCfg, err := parseNodes(*nodes)
@@ -71,6 +78,10 @@ func run() error {
 		CT200A:         *ct200,
 		DefaultEnabled: *defaultEnabled,
 		SensorboxHost:  *sensorboxHost,
+
+		EVMeterEvery:      *meterEvery,
+		EVMeterTimeout:    *meterTimeout,
+		EVMeterStaleAfter: *meterStale,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -95,8 +106,7 @@ func run() error {
 		}
 		sim = smartevse.NewSim(ids...)
 		sim.House = [3]float64{5, 5, 5}
-		bus = smartevse.NewBus(sim)
-		bus.BroadcastGap = 0
+		bus = smartevse.NewSimBus(sim)
 		go advanceSim(ctx, sim)
 		log.Info("running against simulated bus", "nodes", ids)
 	} else {
@@ -106,6 +116,9 @@ func run() error {
 			bus.Timeout = *timeout
 		}
 	}
+	bus.InterFrameDelay = *interFrame
+	bus.BroadcastTurnaround = *turnaround
+	bus.Trace = *trace
 	defer bus.Close()
 
 	m, err := smartevse.NewMaster(bus, cfg, log)

@@ -63,7 +63,7 @@ func TestSensorboxWebNeedsNewStamp(t *testing.T) {
 
 func TestSensorboxWebNotWithCT200(t *testing.T) {
 	cfg := Config{MaxMains: 25, Nodes: []NodeConfig{{ID: 1, MaxA: 16}}, CT200A: true, SensorboxHost: "sb"}
-	if _, err := NewMaster(NewBus(NewSim(1)), cfg, nil); err == nil {
+	if _, err := NewMaster(NewSimBus(NewSim(1)), cfg, nil); err == nil {
 		t.Error("no error for web api with 200A CTs")
 	}
 }

@@ -14,8 +14,7 @@ import (
 func newTestAPI(t *testing.T) (http.Handler, *smartevse.Master) {
 	t.Helper()
 	sim := smartevse.NewSim(1, 2)
-	bus := smartevse.NewBus(sim)
-	bus.BroadcastGap = 0
+	bus := smartevse.NewSimBus(sim)
 	nodes, err := parseNodes("1:16:node1, 2:10")
 	if err != nil {
 		t.Fatal(err)

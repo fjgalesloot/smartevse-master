@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -12,6 +13,51 @@ import (
 type Transport interface {
 	io.ReadWriteCloser
 	SetReadDeadline(t time.Time) error
+}
+
+// flusher is a transport that can discard received bytes not yet read
+// (serial: TCFLSH). n is the number of bytes dropped, -1 if unknown.
+type flusher interface {
+	flushInput() (n int, err error)
+}
+
+// drainer is a transport that can wait until written bytes have left the
+// UART (serial: tcdrain). Without it the bus assumes they leave at line speed.
+type drainer interface {
+	drainOutput() error
+}
+
+// clock is the time base of the bus: gaps, transmit ends and timeouts.
+type clock interface {
+	Now() time.Time
+	Sleep(time.Duration)
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time        { return time.Now() }
+func (realClock) Sleep(d time.Duration) { time.Sleep(d) }
+
+// virtualClock only moves when the bus waits, so the simulator and tests run
+// at full speed while gaps, transmit times and timeouts are still accounted for.
+type virtualClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *virtualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *virtualClock) Sleep(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
 }
 
 // NewBusURI returns a bus for a URI. The transport is opened by the first request
@@ -22,12 +68,11 @@ type Transport interface {
 //	/dev/ttyUSB0             local serial port, 9600 8N1 (Linux)
 //	tcp://192.168.1.50:4001  transparent RS485-to-Ethernet gateway or ser2net raw (RTU frames, NOT Modbus TCP)
 func NewBusURI(uri string, log *slog.Logger) *Bus {
-	b := &Bus{name: uri, log: log, retry: time.Second, open: func() (Transport, error) { return OpenURI(uri) }}
+	b := newBus(nil, realClock{})
+	b.name, b.log, b.retry = uri, log, time.Second
+	b.open = func() (Transport, error) { return OpenURI(uri) }
 	if strings.HasPrefix(uri, "tcp://") {
-		// network jitter: the gap keeps the next request from merging with a broadcast
-		b.Timeout, b.BroadcastGap = 500*time.Millisecond, 50*time.Millisecond
-	} else {
-		b.Timeout, b.BroadcastGap = 250*time.Millisecond, 20*time.Millisecond
+		b.Timeout = 500 * time.Millisecond // network jitter
 	}
 	return b
 }

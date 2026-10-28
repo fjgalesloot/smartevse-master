@@ -38,6 +38,13 @@ type Sim struct {
 
 	// Log records every frame the master sent (for assertions).
 	Log []SimFrame
+
+	// Merged counts requests that started within 3.5 characters of the end of
+	// the previous frame: the devices see one merged frame with a bad CRC and
+	// nobody answers. Needs the bus clock (NewSimBus).
+	Merged int
+	busNow func() time.Time // bus clock
+	txEnd  time.Time        // end of the last request on the bus clock
 }
 
 // SimFrame is a request seen on the bus.
@@ -75,6 +82,7 @@ type SimNode struct {
 	MeterType    int
 	MeterAddr    int
 	MeterOffline bool    // meter does not answer
+	MeterDrop    int     // the next MeterDrop requests to the meter go unanswered
 	MeterKWh     float64 // meter total
 	CfgChanged   bool    // reg 0x0006: settings saved, master clears it
 
@@ -362,6 +370,15 @@ func (n *SimNode) writeError(v int) {
 func (s *Sim) Write(f []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.busNow != nil {
+		at := s.busNow()
+		merged := !s.txEnd.IsZero() && at.Sub(s.txEnd) < minGap
+		s.txEnd = at.Add(frameTime(len(f)))
+		if merged {
+			s.Merged++
+			return len(f), nil
+		}
+	}
 	if len(f) < 4 || crc16(f[:len(f)-2]) != binary.LittleEndian.Uint16(f[len(f)-2:]) {
 		return len(f), nil // garbage: nobody answers
 	}
@@ -387,7 +404,9 @@ func (s *Sim) Write(f []byte) (int, error) {
 			}[:count])
 		} else if ok && !n.Offline && reg == regNodeEVMeter && count == 2 {
 			s.reply(addr, fc, []uint16{uint16(n.MeterType), uint16(n.MeterAddr)})
-		} else if m := s.meterAt(addr); m != nil {
+		} else if m := s.meterAt(addr); m != nil && m.MeterDrop > 0 {
+			m.MeterDrop--
+		} else if m != nil {
 			s.meterRequest(m, reg, count)
 		}
 	case 0x10:
@@ -542,6 +561,15 @@ func (s *Sim) Read(p []byte) (int, error) {
 	}
 	n := copy(p, s.rx)
 	s.rx = s.rx[n:]
+	return n, nil
+}
+
+// flushInput discards queued answer bytes, as TCFLSH does.
+func (s *Sim) flushInput() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.rx)
+	s.rx = nil
 	return n, nil
 }
 

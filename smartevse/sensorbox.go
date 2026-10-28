@@ -35,7 +35,7 @@ func (m Mains) Imeasured() int {
 	return max
 }
 
-// ReadSensorbox reads the mains currents from a Sensorbox-2 (address 0x0A).
+// readSensorbox reads the mains currents from a Sensorbox-2 (address 0x0A).
 //
 // Register map (Sensorbox-2 firmware, main.cpp header):
 //
@@ -50,8 +50,8 @@ func (m Mains) Imeasured() int {
 // power divided by a fixed nominal voltage, so × 230 V is their real power.
 //
 // ct200A doubles CT readings for 200A:50mA clamps, as the firmware does when MaxMains > 100.
-func ReadSensorbox(b *Bus, ct200A bool) (Mains, error) {
-	data, err := b.ReadInput(SensorboxAddr, 0x0000, 20)
+func readSensorbox(b *Bus, ct200A bool) (Mains, error) {
+	data, err := b.readInput(SensorboxAddr, 0x0000, 20)
 	if err != nil {
 		return Mains{}, err
 	}
