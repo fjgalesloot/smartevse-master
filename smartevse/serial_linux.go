@@ -52,14 +52,19 @@ func openSerial(path string) (Transport, error) {
 }
 
 // control runs f on the fd. Through SyscallConn, because File.Fd would
-// switch the fd to blocking mode and break the read deadlines.
+// switch the fd to blocking mode and break the read deadlines. f is repeated
+// on EINTR: a blocking ioctl (tcdrain) is interrupted by the signals the Go
+// runtime uses to preempt goroutines.
 func (p serialPort) control(f func(fd uintptr) syscall.Errno) error {
 	rc, err := p.SyscallConn()
 	if err != nil {
 		return err
 	}
 	var errno syscall.Errno
-	if err := rc.Control(func(fd uintptr) { errno = f(fd) }); err != nil {
+	if err := rc.Control(func(fd uintptr) {
+		for errno = f(fd); errno == syscall.EINTR; errno = f(fd) {
+		}
+	}); err != nil {
 		return err
 	}
 	if errno != 0 {
