@@ -96,6 +96,14 @@ type SimNode struct {
 	HeardKWh    float64 // energy the node picked up from its meter's answers (its OCPP meter value)
 	PWM         int     // advertised current, 0.1 A
 
+	// OCPP with auto-auth (MicroOcpp FreeVend) and the RFID reader disabled:
+	// OCPP owns the access register (ocppLoop in esp32.cpp).
+	OCPP        bool
+	OCPPTx      int  // OCPPTxNone / OCPPTxRunning / OCPPTxStopping
+	ocppStop    int  // seconds until a stopping transaction is gone
+	ocppPlugged bool // FreeVend's freeVendTrackPlugged
+	ocppPermits bool // OcppTrackPermitsCharge
+
 	acc time.Duration
 }
 
@@ -275,6 +283,47 @@ func (n *SimNode) tick1s() {
 		n.ChargeDelay--
 	}
 	n.stateMachine()
+	// after the state machine: a master writing ON over OCPP's OFF gets a
+	// request (COMM_B) out of the node before OCPP sets OFF again, as on hardware
+	if n.OCPP {
+		n.ocppLoop()
+	}
+}
+
+// OCPP transaction states of a SimNode.
+const (
+	OCPPTxNone     = iota
+	OCPPTxRunning  // permits charging
+	OCPPTxStopping // ended, StopTransaction held back 5 s (setStopTxReadyInput)
+)
+
+// ocppLoop mirrors ocppLoop() with the RFID reader disabled and auto-auth on,
+// and the parts of MicroOcpp's Connector::loop it relies on. A transaction
+// only starts when a car is plugged in while no transaction exists, so a car
+// plugged in again within 5 s of being unplugged gets none. ocppLoop runs on
+// every main loop; once a second is close enough for a master polling every 2 s.
+func (n *SimNode) ocppLoop() {
+	plugged := n.Connected
+	switch {
+	case n.OCPPTx == OCPPTxStopping:
+		if n.ocppStop--; n.ocppStop <= 0 {
+			n.OCPPTx = OCPPTxNone
+		}
+	case n.OCPPTx == OCPPTxRunning && !plugged:
+		n.OCPPTx, n.ocppStop = OCPPTxStopping, 5 // EVDisconnected
+	}
+	if !n.ocppPlugged && plugged && n.OCPPTx == OCPPTxNone {
+		n.OCPPTx = OCPPTxRunning // FreeVend
+	}
+	n.ocppPlugged = plugged
+
+	permits := n.OCPPTx == OCPPTxRunning
+	if !n.ocppPermits && permits {
+		n.SetAccess(AccessOn)
+	} else if n.Access == AccessOn && !permits {
+		n.SetAccess(AccessOff)
+	}
+	n.ocppPermits = permits
 }
 
 // stateMachine runs the EVSE state machine. Every request to the master needs

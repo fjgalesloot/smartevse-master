@@ -27,7 +27,8 @@ Every 2 s:
    reported max (reg 0x0007), the `-nodes` hard cap and the evcc limit. It is 0
    when evcc has disabled the node or set a limit below MinCurrent.
 3. **Pause.** A node with a car that evcc does not allow to charge is paused
-   through its access register; all others are set to ON (see
+   through its access register; all others are set to ON, except a node that
+   is OFF by itself (OCPP, RFID), which is left alone (see
    [Stopping a car](#ramping-down-and-stopping-a-car-off)).
 4. **Handshake.** Requests from nodes waiting to start (COMM_B, COMM_C) are
    answered (see [Starting a car](#starting-a-car-on)).
@@ -114,8 +115,17 @@ current moves from one car to another.
     car being plugged in, so evcc would never see the car connect and never
     enable the node. When a car is plugged in, the node asks to charge (COMM_B)
     and is paused in the same cycle; evcc sees status B.
-  - **evcc wins:** a change made on the node (button, web UI, MQTT) is undone in
-    the next cycle.
+  - **evcc wins:** a pause or resume made on the node (button, web UI, MQTT) is
+    undone in the next cycle.
+  - **OFF is the node's own:** OCPP without a transaction, RFID lock, delayed
+    start or mode Off. The master never writes ON over it. With the RFID reader
+    Disabled or Rmt/OCPP, `ocppLoop` (esp32.cpp:2884) sets OFF on every loop
+    while no transaction permits charging, so writing ON only made the node
+    flap between COMM_B and B1. With auto-auth, MicroOcpp's FreeVend starts a
+    transaction only when a car is plugged in while no transaction exists; the
+    old one lingers ~5 s after unplugging (`setStopTxReadyInput`), so a car
+    plugged in again within ~5 s gets none and the node stays OFF until the
+    next replug.
   - **Re-enabling:** the master writes ON; the node goes B1 → COMM_B → … → C, about 6 s.
   - **The setting is stored on the node**, so a node stays paused if smartevse-master
     stops; it then needs the button or web UI to charge on its own.

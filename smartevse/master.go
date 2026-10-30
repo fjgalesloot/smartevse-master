@@ -45,8 +45,9 @@ type node struct {
 	state   int
 	err     int
 	mode    int
-	maxA    int // reported by node (reg 0x0007)
-	access  int // reg 0x0005, as read or last written
+	maxA    int  // reported by node (reg 0x0007)
+	access  int  // reg 0x0005, as read or last written
+	off     bool // access OFF, set by the node itself (logged once)
 	enabled bool
 	limit   int // 0.1 A, from evcc
 	logged  int // 0.1 A, current broadcast to the node when last logged
@@ -291,7 +292,8 @@ func (m *Master) control() {
 		if n.online == 0 {
 			continue
 		}
-		vals := m.bal.NodeUpdate(n.slot(), n.err, n.mode, imeas, m.allowed(n), n.access == AccessPause, m.fault)
+		// a node that went OFF while waiting for an answer is sent to B1 like a paused one
+		vals := m.bal.NodeUpdate(n.slot(), n.err, n.mode, imeas, m.allowed(n) && !n.off, n.access != AccessOn, m.fault)
 		if vals == nil {
 			continue
 		}
@@ -365,6 +367,8 @@ func (m *Master) currentReason(n *node, b int) string {
 	switch {
 	case n.online == 0:
 		return "offline"
+	case n.off:
+		return "node off"
 	case !n.enabled:
 		return "evcc disabled"
 	case !n.hold.IsZero():
@@ -426,19 +430,27 @@ func (m *Master) warn(msg string, err error, args ...any) {
 
 // syncAccess pauses a node evcc does not allow to charge through the node's
 // own access register: the node stops a charging car by itself, does not ask
-// to charge again, and its display, web UI and MQTT show "Pause". evcc wins: a
-// change made on the node (button, web UI, MQTT) is undone in the next cycle.
+// to charge again, and its display, web UI and MQTT show "Pause". evcc wins
+// over a pause or resume made on the node (button, web UI, MQTT): it is undone
+// in the next cycle.
 //
-// A node without a car (state A) is set to ON: a paused node in A ignores a car
-// being plugged in, so evcc would never see it connect. Plugging in then makes
-// it ask to charge (COMM_B), and it is paused in the same cycle.
+// OFF is left alone: it is the node's own "may not charge" (OCPP without a
+// transaction, RFID lock, delayed start, mode Off). With the RFID reader
+// disabled or in OCPP mode, OCPP sets OFF again on every loop while no
+// transaction permits charging, so writing ON would only make the node flap
+// between B and B1. The node sets ON itself once it may charge again (OCPP
+// auto-auth starts a transaction when a car is plugged in).
+//
+// A paused node without a car (state A) is set to ON: a paused node in A
+// ignores a car being plugged in, so evcc would never see it connect. Plugging
+// in then makes it ask to charge (COMM_B), and it is paused in the same cycle.
 //
 // A phase switch holds the node paused the same way until it reports that it
 // has left C (B1 or B), so it restarts and switches its contactors.
 func (m *Master) syncAccess() {
 	for _, n := range m.sortedNodes() {
 		if !n.hold.IsZero() {
-			left := n.access == AccessPause && n.state != StateC && n.state != StateD &&
+			left := n.access != AccessOn && n.state != StateC && n.state != StateD &&
 				n.state != StateC1 && n.state != StateCommCOK
 			if timeout := m.cycleAt.Sub(n.hold) > holdTimeout; left || timeout || n.online == 0 {
 				if timeout {
@@ -448,6 +460,17 @@ func (m *Master) syncAccess() {
 			}
 		}
 		if n.online == 0 {
+			continue
+		}
+		if off := n.access == AccessOff; off != n.off {
+			n.off = off
+			if off {
+				m.log.Info("node is off (OCPP, RFID or on the node): it may not charge until it switches on", "node", n.id)
+			} else {
+				m.log.Info("node switched on", "node", n.id, "access", AccessName(n.access))
+			}
+		}
+		if n.off {
 			continue
 		}
 		want := AccessOn

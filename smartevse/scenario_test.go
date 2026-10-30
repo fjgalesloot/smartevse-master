@@ -369,6 +369,59 @@ func TestScenarioAccessChangedOnNode(t *testing.T) {
 	}
 }
 
+// OCPP with auto-auth owns the access register: OFF without a transaction,
+// ON once plugging in starts one. The master leaves OFF alone; writing ON made
+// the node ask to charge and drop back to B1 every few seconds (seen on
+// hardware after the car was plugged in again within 5 s of unplugging it).
+func TestScenarioOCPPAccess(t *testing.T) {
+	h := newHarness(t)
+	n := h.sim.Node(1)
+	n.OCPP = true
+
+	// stays off without a car
+	h.run(10 * time.Second)
+	if n.Access != AccessOff || n.State != StateA {
+		t.Fatalf("no car: state %s access %s, want A off", StateName(n.State), AccessName(n.Access))
+	}
+
+	// plugging in starts a transaction: charges
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
+
+	// evcc pauses and resumes it; OCPP leaves PAUSE alone
+	h.m.Node(1).Enable(false)
+	h.runUntil(2*Interval, "node 1 stopped", func() bool { return h.amps(1) == 0 })
+	h.run(10 * time.Second)
+	if n.Access != AccessPause {
+		t.Fatalf("disabled: access %s, want pause", AccessName(n.Access))
+	}
+	h.m.Node(1).Enable(true)
+	h.runUntil(20*time.Second, "node 1 resumed", h.charging(1))
+
+	// plugged in again within 5 s: no transaction, the node stays off and quiet
+	n.Connected = false
+	h.run(Interval)
+	n.Connected = true
+	for i := 0; i < 15; i++ {
+		h.run(Interval)
+		if n.State != StateA || n.Access != AccessOff {
+			t.Fatalf("fast replug: state %s access %s, want A off", StateName(n.State), AccessName(n.Access))
+		}
+	}
+	if s := h.m.Snapshot().Nodes[0].Access; s != "off" {
+		t.Errorf("api access %q, want off", s)
+	}
+
+	// plugged in again after the old transaction is gone: charges
+	n.Connected = false
+	h.run(10 * time.Second)
+	n.Connected = true
+	h.runUntil(20*time.Second, "node 1 charging after replug", h.charging(1))
+	if h.peakOver > 0 {
+		t.Errorf("mains exceeded by %.1f A\n%s", h.peakOver, h.peakAt)
+	}
+}
+
 // evcc switches a charging car from 3P to 1P and back. The node only switches
 // its contactors on entering C, so the master pauses it until it has stopped
 // and then lets it restart. The node's web server is busy at first (503).

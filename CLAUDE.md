@@ -125,7 +125,9 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   ChargeDelay, COMM_TIMEOUT, access (setAccess), EV meter listening and COMM_EVTIMEOUT;
   contactor 2 (switched on entering C) and the node REST API as http.RoundTripper
   (host "node<id>", WebBusy for 503s)
-- scenario_test.go: 24 scenarios (every cycle also checks no merged frames);
+- sim.go: optional OCPP per node (SimNode.OCPP): auto-auth transaction on plug-in,
+  ended on unplug and gone 5 s later; OCPP owns access (OFF without a transaction)
+- scenario_test.go: 25 scenarios (every cycle also checks no merged frames);
   bus_timing_test.go: gaps + single transport user under concurrent API calls, late
   reply flushed, EV meter budget (dead meters never move the broadcast or overrun),
   retry/stale/implausible, merged frame in the Sim; soak_test.go: 20 seeds × 2 h random events;
@@ -144,8 +146,12 @@ Deliberate deviations from the firmware (all found by the simulator):
 5. A node evcc disabled is paused through its access register instead of rejected
    with LESS_6A → re-enable takes ~6 s instead of 64 s (node ChargeDelay), and the
    node shows "Pause". A waiting node (COMM_B/COMM_C) is sent to B1 once paused. evcc
-   wins: a change on the node is undone next cycle. A node in state A is kept ON, or
-   it would not notice a car and evcc would never see it connect.
+   wins: a pause/resume on the node is undone next cycle. A paused node in state A is
+   set ON, or it would not notice a car and evcc would never see it connect. OFF is
+   never overwritten: with the RFID reader Disabled/OCPP, OCPP forces OFF on every
+   loop without a transaction (writing ON made the node flap COMM_B ↔ B1). Auto-auth
+   (FreeVend) starts a transaction only on plug-in with no transaction left; the old
+   one lingers ~5 s after unplug, so a replug within ~5 s stays OFF.
 6. EV meter setting is also re-read when a node comes back online (it may have
    restarted with other settings; firmware only reads it at master boot or on the flag).
 7. No separate power read for meters whose current answer holds the phase powers
