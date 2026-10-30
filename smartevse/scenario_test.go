@@ -28,7 +28,7 @@ func newHarness(t *testing.T, mutate ...func(*Config)) *harness {
 	cfg := Config{
 		MaxMains:       25,
 		MinCurrent:     6,
-		Nodes:          []NodeConfig{{ID: 1, MaxA: 16, Host: "node1"}, {ID: 2, MaxA: 16, Host: "node2"}},
+		Nodes:          []NodeConfig{{ID: 1, Host: "node1"}, {ID: 2, Host: "node2"}},
 		DefaultEnabled: true,
 	}
 	for _, f := range mutate {
@@ -98,7 +98,7 @@ func (h *harness) check() {
 			continue // a node cut off from the bus cannot be corrected; it stops on its timeout
 		}
 		info := h.m.Node(id).Info()
-		limit := math.Min(float64(n.MaxA), float64(h.cfg.Nodes[id-1].MaxA))
+		limit := float64(n.MaxA)
 		if info.LimitA > 0 {
 			limit = math.Min(limit, info.LimitA)
 		}
@@ -207,8 +207,8 @@ func TestScenarioEvccLimit(t *testing.T) {
 	near(t, "node 2 takes rest", h.amps(2), 14, 0.5)
 }
 
-// The node reports a lower maximum than configured: the master must respect it,
-// because a node does not enforce its own maximum when driven by a master.
+// The node's own maximum is the cap: the master must respect it, because a
+// node does not enforce its own maximum when driven by a master.
 func TestScenarioNodeReportedMaxIsRespected(t *testing.T) {
 	h := newHarness(t, func(c *Config) { c.MaxMains = 40 })
 	h.sim.Node(1).MaxA = 10
@@ -366,6 +366,59 @@ func TestScenarioAccessChangedOnNode(t *testing.T) {
 	}
 	if a := h.sim.Node(1).Access; a != AccessPause {
 		t.Errorf("node 1 access %s, want pause", AccessName(a))
+	}
+}
+
+// OCPP with auto-auth owns the access register: OFF without a transaction,
+// ON once plugging in starts one. The master leaves OFF alone; writing ON made
+// the node ask to charge and drop back to B1 every few seconds (seen on
+// hardware after the car was plugged in again within 5 s of unplugging it).
+func TestScenarioOCPPAccess(t *testing.T) {
+	h := newHarness(t)
+	n := h.sim.Node(1)
+	n.OCPP = true
+
+	// stays off without a car
+	h.run(10 * time.Second)
+	if n.Access != AccessOff || n.State != StateA {
+		t.Fatalf("no car: state %s access %s, want A off", StateName(n.State), AccessName(n.Access))
+	}
+
+	// plugging in starts a transaction: charges
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
+
+	// evcc pauses and resumes it; OCPP leaves PAUSE alone
+	h.m.Node(1).Enable(false)
+	h.runUntil(2*Interval, "node 1 stopped", func() bool { return h.amps(1) == 0 })
+	h.run(10 * time.Second)
+	if n.Access != AccessPause {
+		t.Fatalf("disabled: access %s, want pause", AccessName(n.Access))
+	}
+	h.m.Node(1).Enable(true)
+	h.runUntil(20*time.Second, "node 1 resumed", h.charging(1))
+
+	// plugged in again within 5 s: no transaction, the node stays off and quiet
+	n.Connected = false
+	h.run(Interval)
+	n.Connected = true
+	for i := 0; i < 15; i++ {
+		h.run(Interval)
+		if n.State != StateA || n.Access != AccessOff {
+			t.Fatalf("fast replug: state %s access %s, want A off", StateName(n.State), AccessName(n.Access))
+		}
+	}
+	if s := h.m.Snapshot().Nodes[0].Access; s != "off" {
+		t.Errorf("api access %q, want off", s)
+	}
+
+	// plugged in again after the old transaction is gone: charges
+	n.Connected = false
+	h.run(10 * time.Second)
+	n.Connected = true
+	h.runUntil(20*time.Second, "node 1 charging after replug", h.charging(1))
+	if h.peakOver > 0 {
+		t.Errorf("mains exceeded by %.1f A\n%s", h.peakOver, h.peakAt)
 	}
 }
 

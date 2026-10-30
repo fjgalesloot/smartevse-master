@@ -14,7 +14,6 @@ import (
 // NodeConfig describes one SmartEVSE configured as "Node <ID>".
 type NodeConfig struct {
 	ID   int    // 1..7, the Load Balancing setting on the unit (Node 1 = Modbus address 2)
-	MaxA int    // hard cap in A, applied on top of what the node reports
 	Host string // WiFi host name or address of the unit, for 1P/3P switching; "" = none
 }
 
@@ -37,16 +36,19 @@ type Config struct {
 // Interval is the control cycle, same as the firmware.
 const Interval = 2 * time.Second
 
+// maxNodeA is the most any node gets (A), the clamp in the firmware's SetCurrent.
+const maxNodeA = 80
+
 type node struct {
 	id      int
 	addr    byte
-	capA    int
 	online  int // countdown, 5 = just seen
 	state   int
 	err     int
 	mode    int
-	maxA    int // reported by node (reg 0x0007)
-	access  int // reg 0x0005, as read or last written
+	maxA    int  // reported by node (reg 0x0007)
+	access  int  // reg 0x0005, as read or last written
+	off     bool // access OFF, set by the node itself (logged once)
 	enabled bool
 	limit   int // 0.1 A, from evcc
 	logged  int // 0.1 A, current broadcast to the node when last logged
@@ -146,15 +148,12 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 		if nc.ID < 1 || nc.ID > 7 {
 			return nil, fmt.Errorf("node id %d out of range 1..7", nc.ID)
 		}
-		if nc.MaxA < cfg.MinCurrent || nc.MaxA > 80 {
-			return nil, fmt.Errorf("node %d: max %d A out of range %d..80", nc.ID, nc.MaxA, cfg.MinCurrent)
-		}
 		if _, dup := m.nodes[nc.ID]; dup {
 			return nil, fmt.Errorf("node %d configured twice", nc.ID)
 		}
 		m.nodes[nc.ID] = &node{
-			id: nc.ID, addr: byte(nc.ID + 1), capA: nc.MaxA,
-			enabled: cfg.DefaultEnabled, limit: nc.MaxA * 10, cfgChanged: true,
+			id: nc.ID, addr: byte(nc.ID + 1),
+			enabled: cfg.DefaultEnabled, limit: maxNodeA * 10, cfgChanged: true,
 			host: nc.Host, c2: -1,
 			meterDue: uint64(1 + i%cfg.EVMeterEvery), // spread the meters over the cycles
 		}
@@ -291,7 +290,8 @@ func (m *Master) control() {
 		if n.online == 0 {
 			continue
 		}
-		vals := m.bal.NodeUpdate(n.slot(), n.err, n.mode, imeas, m.allowed(n), n.access == AccessPause, m.fault)
+		// a node that went OFF while waiting for an answer is sent to B1 like a paused one
+		vals := m.bal.NodeUpdate(n.slot(), n.err, n.mode, imeas, m.allowed(n) && !n.off, n.access != AccessOn, m.fault)
 		if vals == nil {
 			continue
 		}
@@ -365,6 +365,8 @@ func (m *Master) currentReason(n *node, b int) string {
 	switch {
 	case n.online == 0:
 		return "offline"
+	case n.off:
+		return "node off"
 	case !n.enabled:
 		return "evcc disabled"
 	case !n.hold.IsZero():
@@ -379,8 +381,6 @@ func (m *Master) currentReason(n *node, b int) string {
 		return "evcc limit"
 	case b == n.maxA*10:
 		return "node max"
-	case b == n.capA*10:
-		return "configured max"
 	}
 	return "balancer"
 }
@@ -426,19 +426,27 @@ func (m *Master) warn(msg string, err error, args ...any) {
 
 // syncAccess pauses a node evcc does not allow to charge through the node's
 // own access register: the node stops a charging car by itself, does not ask
-// to charge again, and its display, web UI and MQTT show "Pause". evcc wins: a
-// change made on the node (button, web UI, MQTT) is undone in the next cycle.
+// to charge again, and its display, web UI and MQTT show "Pause". evcc wins
+// over a pause or resume made on the node (button, web UI, MQTT): it is undone
+// in the next cycle.
 //
-// A node without a car (state A) is set to ON: a paused node in A ignores a car
-// being plugged in, so evcc would never see it connect. Plugging in then makes
-// it ask to charge (COMM_B), and it is paused in the same cycle.
+// OFF is left alone: it is the node's own "may not charge" (OCPP without a
+// transaction, RFID lock, delayed start, mode Off). With the RFID reader
+// disabled or in OCPP mode, OCPP sets OFF again on every loop while no
+// transaction permits charging, so writing ON would only make the node flap
+// between B and B1. The node sets ON itself once it may charge again (OCPP
+// auto-auth starts a transaction when a car is plugged in).
+//
+// A paused node without a car (state A) is set to ON: a paused node in A
+// ignores a car being plugged in, so evcc would never see it connect. Plugging
+// in then makes it ask to charge (COMM_B), and it is paused in the same cycle.
 //
 // A phase switch holds the node paused the same way until it reports that it
 // has left C (B1 or B), so it restarts and switches its contactors.
 func (m *Master) syncAccess() {
 	for _, n := range m.sortedNodes() {
 		if !n.hold.IsZero() {
-			left := n.access == AccessPause && n.state != StateC && n.state != StateD &&
+			left := n.access != AccessOn && n.state != StateC && n.state != StateD &&
 				n.state != StateC1 && n.state != StateCommCOK
 			if timeout := m.cycleAt.Sub(n.hold) > holdTimeout; left || timeout || n.online == 0 {
 				if timeout {
@@ -448,6 +456,17 @@ func (m *Master) syncAccess() {
 			}
 		}
 		if n.online == 0 {
+			continue
+		}
+		if off := n.access == AccessOff; off != n.off {
+			n.off = off
+			if off {
+				m.log.Info("node is off (OCPP, RFID or on the node): it may not charge until it switches on", "node", n.id)
+			} else {
+				m.log.Info("node switched on", "node", n.id, "access", AccessName(n.access))
+			}
+		}
+		if n.off {
 			continue
 		}
 		want := AccessOn
@@ -616,7 +635,11 @@ func (m *Master) plausible(n *node, currents [3]int, energy int) error {
 			float64(mt.energy)/1000, float64(energy)/1000)
 	}
 	dt := m.cycleAt.Sub(mt.at)
-	maxWh := float64(n.capA*3*maxPhaseVolts)*dt.Hours()*1.5 + energySlackWh
+	capA := n.maxA
+	if capA <= 0 || capA > maxNodeA {
+		capA = maxNodeA
+	}
+	maxWh := float64(capA*3*maxPhaseVolts)*dt.Hours()*1.5 + energySlackWh
 	if rise := energy - mt.energy; float64(rise) > maxWh {
 		return fmt.Errorf("%w: energy rose %d Wh in %v, at most %.0f Wh possible", errImplausible, rise, dt, maxWh)
 	}
@@ -692,18 +715,15 @@ func (m *Master) allowed(n *node) bool {
 	return n.enabled && n.limit >= m.cfg.MinCurrent*10 && n.hold.IsZero()
 }
 
-// effectiveMax is the most a node may ever get: the lowest of what the node
-// reports, the configured cap and the evcc limit. Nodes do not enforce their
-// own maximum when driven by a master, so this is the safety cap.
+// effectiveMax is the most a node may ever get: the lower of its own max
+// setting (reg 0x0007) and the evcc limit. Nodes do not enforce their own
+// maximum when driven by a master, so this is the safety cap. Until the node
+// has reported its setting it gets nothing.
 func (m *Master) effectiveMax(n *node) int {
-	if !m.allowed(n) {
+	if !m.allowed(n) || n.maxA <= 0 {
 		return 0
 	}
-	max := n.capA * 10
-	if n.maxA > 0 {
-		max = min(max, n.maxA*10)
-	}
-	return min(max, n.limit)
+	return min(min(n.maxA, maxNodeA)*10, n.limit)
 }
 
 func (m *Master) sortedNodes() []*node {
@@ -771,7 +791,7 @@ func (h *Node) MaxCurrent(current int64) error {
 
 // MaxCurrentMillis sets the evcc limit in A with 0.1 A resolution.
 func (h *Node) MaxCurrentMillis(current float64) error {
-	if current < 0 || current > 80 {
+	if current < 0 || current > maxNodeA {
 		return fmt.Errorf("current %.1f A out of range", current)
 	}
 	h.m.mu.Lock()
@@ -781,7 +801,7 @@ func (h *Node) MaxCurrentMillis(current float64) error {
 }
 
 // ErrNoHost is returned for 1P/3P switching on a node without a WiFi host.
-var ErrNoHost = errors.New("no host configured for this node (-nodes id:maxA:host)")
+var ErrNoHost = errors.New("no host configured for this node (-nodes id:host)")
 
 // Phases1p3p switches the node between 1 and 3 phases through contactor 2
 // (evcc api.PhaseSwitcher). The setting goes to the node's WiFi REST API;
