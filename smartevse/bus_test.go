@@ -33,7 +33,9 @@ func nodeTransport() (Transport, error) {
 
 // reconnectBus returns a bus without backoff that logs into buf.
 func reconnectBus(buf *bytes.Buffer, open func() (Transport, error)) *Bus {
-	return &Bus{open: open, Timeout: time.Second, log: slog.New(slog.NewTextHandler(buf, nil))}
+	b := NewBus(nil)
+	b.open, b.Timeout, b.log = open, time.Second, slog.New(slog.NewTextHandler(buf, nil))
+	return b
 }
 
 func TestBusReconnects(t *testing.T) {
@@ -49,15 +51,15 @@ func TestBusReconnects(t *testing.T) {
 		return nodeTransport()
 	})
 
-	if _, err := b.ReadInput(2, 0, 1); err != nil {
+	if _, err := b.readInput(2, 0, 1); err != nil {
 		t.Fatal(err)
 	}
 	b.t.Close()
 	b.t, _ = b.open()
-	if _, err := b.ReadInput(2, 0, 1); !errors.Is(err, ErrBusDown) {
+	if _, err := b.readInput(2, 0, 1); !errors.Is(err, ErrBusDown) {
 		t.Fatalf("read on closed connection: got %v, want ErrBusDown", err)
 	}
-	data, err := b.ReadInput(2, 0, 1)
+	data, err := b.readInput(2, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,13 +86,13 @@ func TestBusMissingAtStartLogsOnce(t *testing.T) {
 	})
 
 	for i := 0; i < 5; i++ {
-		if _, err := b.ReadInput(2, 0, 1); !errors.Is(err, ErrBusDown) {
+		if _, err := b.readInput(2, 0, 1); !errors.Is(err, ErrBusDown) {
 			t.Fatalf("read without device: got %v, want ErrBusDown", err)
 		}
 	}
 	present = true
 	for i := 0; i < 3; i++ {
-		if _, err := b.ReadInput(2, 0, 1); err != nil {
+		if _, err := b.readInput(2, 0, 1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -111,8 +113,8 @@ func TestBusBackoff(t *testing.T) {
 
 	want := []time.Duration{1, 2, 4, 8, 16, 30, 30}
 	for i, w := range want {
-		b.ReadInput(2, 0, 1)
-		b.ReadInput(2, 0, 1) // within the backoff: no attempt
+		b.readInput(2, 0, 1)
+		b.readInput(2, 0, 1) // within the backoff: no attempt
 		if b.wait != w*time.Second {
 			t.Errorf("attempt %d: wait %v, want %v", i+1, b.wait, w*time.Second)
 		}

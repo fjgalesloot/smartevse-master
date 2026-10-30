@@ -28,6 +28,10 @@ type Config struct {
 	CT200A         bool          // Sensorbox CTs are 200A:50mA
 	DefaultEnabled bool          // nodes may charge before evcc sent anything
 	SensorboxHost  string        // Sensorbox-2 WiFi REST API, used while it does not answer on the bus; "" = none
+
+	EVMeterEvery      int           // read each EV meter every N cycles, round robin; default 2
+	EVMeterTimeout    time.Duration // response timeout of EV meter reads, 0 = from the answer size and measured latency
+	EVMeterStaleAfter int           // failed reads in a row before an EV meter is stale; default 3
 }
 
 // Interval is the control cycle, same as the firmware.
@@ -49,6 +53,7 @@ type node struct {
 
 	cfgChanged bool // EV meter setting must be (re)read: at start, back online, or flagged by the node
 	meter      evMeter
+	meterDue   uint64 // cycle from which the EV meter is due to be read
 
 	host string    // WiFi REST API, for the contactor 2 setting
 	c2   int       // contactor 2 setting (C2AlwaysOff ...), -1 = not read yet
@@ -61,15 +66,17 @@ const holdTimeout = 30 * time.Second
 
 // evMeter is a node's EV meter as set on the node, with the last readings.
 type evMeter struct {
-	known    bool // setting read from the node
-	typ      int  // EV meter type (reg 0x0108)
-	addr     int  // Modbus address (reg 0x0109)
-	ok       bool // last poll succeeded
-	logged   bool // ok has been logged
-	currents [3]int
-	power    int       // W
-	energy   int       // Wh, total import
-	at       time.Time // last successful poll
+	known     bool // setting read from the node
+	typ       int  // EV meter type (reg 0x0108)
+	addr      int  // Modbus address (reg 0x0109)
+	answered  bool // has answered since the setting was read
+	fails     int  // failed reads in a row
+	stale     bool // fails reached EVMeterStaleAfter: readings are old
+	rejecting bool // an implausible reading has been logged
+	currents  [3]int
+	power     int       // W
+	energy    int       // Wh, total import
+	at        time.Time // last successful poll
 }
 
 func (n *node) slot() int { return int(n.addr) - 1 }
@@ -89,8 +96,10 @@ type Master struct {
 	fault   bool
 	cycles  uint64
 	cycleAt time.Time
-	meterID int  // node whose EV meter was polled last
-	viaWeb  bool // mains currently from the Sensorbox REST API
+	busAt   time.Time   // start of the cycle on the bus clock, for the time budget
+	meterID int         // node whose EV meter was polled last
+	viaWeb  bool        // mains currently from the Sensorbox REST API
+	stale   map[int]int // times an EV meter went stale, by address (survives setting changes)
 
 	web   *nodeWeb      // not locked by mu: used outside it
 	sbWeb *sensorboxWeb // nil = no REST fallback; has its own lock
@@ -103,6 +112,15 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 	}
 	if cfg.Stale == 0 {
 		cfg.Stale = 11 * time.Second
+	}
+	if cfg.EVMeterEvery == 0 {
+		cfg.EVMeterEvery = 2
+	}
+	if cfg.EVMeterStaleAfter == 0 {
+		cfg.EVMeterStaleAfter = 3
+	}
+	if cfg.EVMeterEvery < 0 || cfg.EVMeterStaleAfter < 0 || cfg.EVMeterTimeout < 0 {
+		return nil, fmt.Errorf("EV meter settings must not be negative")
 	}
 	if cfg.MaxMains < cfg.MinCurrent {
 		return nil, fmt.Errorf("max mains %d A below min current %d A", cfg.MaxMains, cfg.MinCurrent)
@@ -122,8 +140,9 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 		nodes: make(map[int]*node),
 		bal:   Balancer{MaxMains: cfg.MaxMains, MaxCircuit: cfg.MaxCircuit, MinCurrent: cfg.MinCurrent},
 		web:   newNodeWeb(),
+		stale: map[int]int{},
 	}
-	for _, nc := range cfg.Nodes {
+	for i, nc := range cfg.Nodes {
 		if nc.ID < 1 || nc.ID > 7 {
 			return nil, fmt.Errorf("node id %d out of range 1..7", nc.ID)
 		}
@@ -137,6 +156,7 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 			id: nc.ID, addr: byte(nc.ID + 1), capA: nc.MaxA,
 			enabled: cfg.DefaultEnabled, limit: nc.MaxA * 10, cfgChanged: true,
 			host: nc.Host, c2: -1,
+			meterDue: uint64(1 + i%cfg.EVMeterEvery), // spread the meters over the cycles
 		}
 	}
 	if cfg.SensorboxHost != "" {
@@ -163,15 +183,25 @@ func (m *Master) SetHTTPTransport(rt http.RoundTripper) {
 	}
 }
 
-// Run executes the control cycle every Interval until ctx is done.
+// Run executes the control cycle every Interval until ctx is done. This is
+// the only goroutine that uses the bus. A cycle that overruns the interval
+// is logged and the next one is skipped, not caught up.
 func (m *Master) Run(ctx context.Context) {
 	if m.sbWeb != nil {
-		go m.sbWeb.run(ctx, m.now)
+		go m.sbWeb.run(ctx, m.now) // HTTP only, never the bus
 	}
 	t := time.NewTicker(Interval)
 	defer t.Stop()
 	for {
+		start := time.Now()
 		m.Cycle()
+		if took := time.Since(start); took > Interval {
+			m.log.Warn("cycle overrun: skipping a cycle", "took", took)
+			select {
+			case <-t.C: // the tick that passed during the cycle
+			default:
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -186,8 +216,9 @@ func (m *Master) Cycle() {
 	defer m.mu.Unlock()
 	m.cycles++
 	m.cycleAt = m.now()
+	m.busAt = m.bus.now()
 	m.control()
-	m.pollEVMeter() // after the broadcast: meters do not delay the control loop
+	m.pollEVMeters() // after the broadcast, in the time left: meters never delay the control loop
 }
 
 // control reads mains and nodes, answers node requests and broadcasts the currents.
@@ -195,7 +226,7 @@ func (m *Master) control() {
 	now := m.cycleAt
 
 	// 1. mains
-	mains, err := ReadSensorbox(m.bus, m.cfg.CT200A)
+	mains, err := readSensorbox(m.bus, m.cfg.CT200A)
 	fresh := err == nil
 	if fresh {
 		m.mains, m.mainsAt = mains, now
@@ -223,7 +254,7 @@ func (m *Master) control() {
 
 	// 2. poll nodes
 	for _, n := range m.sortedNodes() {
-		data, err := m.bus.ReadInput(n.addr, regNodeStatus, nodeStatusRegs)
+		data, err := m.bus.readInput(n.addr, regNodeStatus, nodeStatusRegs)
 		m.bal.Answered[n.slot()] = err == nil
 		if err != nil {
 			if n.online > 0 {
@@ -269,7 +300,7 @@ func (m *Master) control() {
 			args = append(args, "mode", vals[3])
 		}
 		m.log.Info("node state written", args...)
-		if err := m.bus.WriteMultiple(n.addr, regNodeStatus, vals); err != nil {
+		if err := m.bus.writeMultiple(n.addr, regNodeStatus, vals); err != nil {
 			m.warn("node write failed", err, "node", n.id)
 		}
 	}
@@ -286,7 +317,7 @@ func (m *Master) control() {
 	m.bal.Calc(imeas, false)
 	if m.bal.Shortage() || imeas > m.cfg.MaxMains*20 {
 		m.log.Warn("not enough current: stopping all nodes", "imeasured", imeas)
-		if err := m.bus.WriteSingle(BroadcastAddr, regNodeError, ErrLess6A); err != nil {
+		if err := m.bus.writeSingle(BroadcastAddr, regNodeError, ErrLess6A); err != nil {
 			m.warn("broadcast error failed", err)
 		}
 	}
@@ -302,7 +333,7 @@ func (m *Master) control() {
 	for _, l := range m.mains.L {
 		vals = append(vals, uint16(int16(l)))
 	}
-	if err := m.bus.WriteMultiple(BroadcastAddr, regBroadcastLoad, vals); err != nil {
+	if err := m.bus.writeMultiple(BroadcastAddr, regBroadcastLoad, vals); err != nil {
 		m.warn("broadcast failed", err)
 	} else {
 		m.logCurrents()
@@ -427,7 +458,7 @@ func (m *Master) syncAccess() {
 			continue
 		}
 		// the node answers after it has applied the new value
-		if err := m.bus.WriteSingle(n.addr, regNodeAccess, uint16(want)); err != nil {
+		if err := m.bus.writeSingle(n.addr, regNodeAccess, uint16(want)); err != nil {
 			m.warn("node access write failed", err, "node", n.id)
 			continue
 		}
@@ -436,96 +467,197 @@ func (m *Master) syncAccess() {
 	}
 }
 
-// pollEVMeter reads the EV meter of one online node per cycle, round robin, as
-// the firmware master does (ModbusRequestLoop states 3-5 and 20). A node does
-// not read its own meter: it listens to the answers on the bus. The current
-// reading keeps its EV meter timeout (64 s, then EV_NOCOMM stops charging in
-// Smart mode) alive, and the energy reading is what it reports over OCPP.
-func (m *Master) pollEVMeter() {
-	n := m.nextMeterNode()
-	if n == nil {
-		return
+// meterBudget is the part of the cycle that must be left to start reading an
+// EV meter, so meter reads and their retries never delay the next cycle.
+const meterBudget = 600 * time.Millisecond
+
+// Plausibility limits for EV meter readings.
+const (
+	maxMeterCurrent = 1000 // 0.1 A
+	maxPhaseVolts   = 250
+	energySlackWh   = 50 // meter resolution and timing
+)
+
+// errNoBudget: an EV meter read was not started because the cycle is nearly over.
+var errNoBudget = errors.New("cycle time budget used")
+
+// errImplausible marks an EV meter reading that was rejected.
+var errImplausible = errors.New("implausible")
+
+// pollEVMeters reads the EV meters that are due, in the time left after the
+// broadcast. Each meter is due every EVMeterEvery cycles (the firmware master
+// reads one per cycle: ModbusRequestLoop states 3-5 and 20), round robin from
+// the node after the one read last. A meter that does not fit in the cycle
+// stays due and goes first next cycle.
+//
+// A node does not read its own meter: it listens to the answers on the bus.
+// The current reading keeps its EV meter timeout (64 s, then EV_NOCOMM stops
+// charging in Smart mode) alive, and the energy reading is what it reports
+// over OCPP.
+func (m *Master) pollEVMeters() {
+	ns := m.sortedNodes()
+	start := 0
+	for i, n := range ns {
+		if n.id == m.meterID {
+			start = i + 1
+		}
 	}
+	for k := range ns {
+		n := ns[(start+k)%len(ns)]
+		if n.online == 0 || n.meterDue > m.cycles {
+			continue
+		}
+		if !m.budget(meterBudget) || !m.pollEVMeter(n) {
+			m.log.Debug("EV meter read postponed: cycle time used", "node", n.id)
+			return
+		}
+		n.meterDue = m.cycles + uint64(m.cfg.EVMeterEvery)
+		m.meterID = n.id
+	}
+}
+
+// pollEVMeter reads one node's EV meter; false if it ran out of cycle time.
+func (m *Master) pollEVMeter(n *node) bool {
 	if n.cfgChanged && !m.readMeterSetting(n) {
-		return
+		return true
 	}
 	spec, ok := lookupMeter(n.meter.typ)
 	if !ok || n.meter.addr <= SensorboxAddr {
-		return
+		return true
 	}
 	mt := &n.meter
 	addr := byte(mt.addr)
 
+	var (
+		currents [3]int
+		power    int
+		energy   int
+		hasPower bool
+	)
 	// current first: it is what the node's timeout depends on
 	data, err := m.meterRead(addr, spec.currentRead())
 	if err == nil {
-		var power int
-		var hasPower bool
-		if mt.currents, power, hasPower, err = spec.decodeCurrents(data); err == nil && hasPower {
-			mt.power = power
-		}
+		currents, power, hasPower, err = spec.decodeCurrents(data)
 	}
 	if err == nil {
 		if data, err = m.meterRead(addr, spec.energyRead()); err == nil {
-			mt.energy, err = spec.decodeEnergy(data)
+			energy, err = spec.decodeEnergy(data)
 		}
 	}
 	if r, ok := spec.powerRead(); ok && err == nil {
 		if data, err = m.meterRead(addr, r); err == nil {
-			mt.power, err = spec.decodePower(data)
+			power, err = spec.decodePower(data)
+			hasPower = true
 		}
+	}
+	if errors.Is(err, errNoBudget) {
+		return false
 	}
 	if err == nil {
-		mt.at = m.cycleAt
-		m.log.Debug("EV meter", "node", n.id,
-			"l1", float64(mt.currents[0])/10, "l2", float64(mt.currents[1])/10, "l3", float64(mt.currents[2])/10,
-			"powerW", mt.power, "energyKWh", float64(mt.energy)/1000)
+		err = m.plausible(n, currents, energy)
+	}
+	if err != nil {
+		m.meterFailed(n, err)
+		return true
 	}
 
-	if ok := err == nil; ok != mt.ok || !mt.logged {
-		mt.ok, mt.logged = ok, true
-		if ok {
-			m.log.Info("EV meter answering", "node", n.id, "meter", MeterName(mt.typ), "address", mt.addr,
-				"energyKWh", float64(mt.energy)/1000)
-		} else {
-			m.warn("EV meter read failed", err, "node", n.id, "meter", MeterName(mt.typ), "address", mt.addr)
-		}
-	} else if !ok {
-		m.log.Debug("EV meter read failed", "node", n.id, "err", err)
+	mt.currents, mt.energy, mt.at = currents, energy, m.cycleAt
+	if hasPower {
+		mt.power = power
+	}
+	m.log.Debug("EV meter", "node", n.id,
+		"l1", float64(mt.currents[0])/10, "l2", float64(mt.currents[1])/10, "l3", float64(mt.currents[2])/10,
+		"powerW", mt.power, "energyKWh", float64(mt.energy)/1000)
+	switch {
+	case mt.stale:
+		m.log.Info("EV meter answering again", "node", n.id, "meter", MeterName(mt.typ), "address", mt.addr,
+			"missed", mt.fails, "energyKWh", float64(mt.energy)/1000)
+	case !mt.answered:
+		m.log.Info("EV meter answering", "node", n.id, "meter", MeterName(mt.typ), "address", mt.addr,
+			"energyKWh", float64(mt.energy)/1000)
+	}
+	mt.answered, mt.stale, mt.fails, mt.rejecting = true, false, 0, false
+	return true
+}
+
+// meterFailed counts a failed EV meter read. Single failures are normal on
+// a busy bus (debug); the meter is stale after EVMeterStaleAfter in a row.
+func (m *Master) meterFailed(n *node, err error) {
+	mt := &n.meter
+	mt.fails++
+	if errors.Is(err, errImplausible) && !mt.rejecting {
+		mt.rejecting = true
+		m.log.Warn("EV meter reading rejected", "node", n.id, "address", mt.addr, "err", err)
+	}
+	m.log.Debug("EV meter read failed", "node", n.id, "address", mt.addr, "missed", mt.fails, "err", err)
+	if mt.fails == m.cfg.EVMeterStaleAfter {
+		mt.stale = true
+		m.stale[mt.addr]++
+		m.warn("EV meter not answering: readings are stale", err, "node", n.id, "meter", MeterName(mt.typ),
+			"address", mt.addr, "missed", mt.fails)
 	}
 }
 
+// plausible rejects readings that cannot be right, so that a damaged answer
+// with a valid CRC never reaches the energy total: a current above 100 A, an
+// energy total that went down, or rose faster than the node could charge.
+func (m *Master) plausible(n *node, currents [3]int, energy int) error {
+	for _, c := range currents {
+		if abs(c) > maxMeterCurrent {
+			return fmt.Errorf("%w: current %.1f A", errImplausible, float64(c)/10)
+		}
+	}
+	mt := &n.meter
+	if mt.at.IsZero() {
+		return nil
+	}
+	if energy < mt.energy {
+		return fmt.Errorf("%w: energy went down from %.3f to %.3f kWh", errImplausible,
+			float64(mt.energy)/1000, float64(energy)/1000)
+	}
+	dt := m.cycleAt.Sub(mt.at)
+	maxWh := float64(n.capA*3*maxPhaseVolts)*dt.Hours()*1.5 + energySlackWh
+	if rise := energy - mt.energy; float64(rise) > maxWh {
+		return fmt.Errorf("%w: energy rose %d Wh in %v, at most %.0f Wh possible", errImplausible, rise, dt, maxWh)
+	}
+	return nil
+}
+
+// budget reports whether at least d of the cycle is left.
+func (m *Master) budget(d time.Duration) bool {
+	return Interval-m.bus.now().Sub(m.busAt) >= d
+}
+
+// meterRead reads an EV meter, with one retry for a request that may not
+// have been heard or an answer that was damaged. Each attempt must fit in
+// the cycle, else errNoBudget.
 func (m *Master) meterRead(addr byte, r meterRead) ([]byte, error) {
-	return m.bus.Read(addr, r.fc, r.reg, r.count)
-}
-
-// nextMeterNode returns the next online node after the one polled last.
-func (m *Master) nextMeterNode() *node {
-	var first, next *node
-	for _, n := range m.sortedNodes() {
-		if n.online == 0 {
-			continue
-		}
-		if first == nil {
-			first = n
-		}
-		if next == nil && n.id > m.meterID {
-			next = n
-		}
+	timeout := m.cfg.EVMeterTimeout
+	if timeout == 0 {
+		timeout = m.bus.responseTimeout(addr, 5+int(r.count)*2)
 	}
-	if next == nil {
-		next = first
+	need := timeout + 100*time.Millisecond // plus gap and transmit times
+	if !m.budget(need) {
+		return nil, errNoBudget
 	}
-	if next != nil {
-		m.meterID = next.id
+	data, err := m.bus.readTimeout(addr, r.fc, r.reg, r.count, timeout)
+	if !retryable(err) {
+		return data, err
 	}
-	return next
+	if !m.budget(need) {
+		return nil, err
+	}
+	m.log.Debug("EV meter read failed, retrying", "address", addr, "err", err)
+	if data, err = m.bus.readTimeout(addr, r.fc, r.reg, r.count, timeout); err == nil {
+		m.bus.countRetryOK(addr)
+	}
+	return data, err
 }
 
 // readMeterSetting reads the node's EV meter type and address and clears the
 // node's config-changed flag (requestNodeConfig / receiveNodeConfig).
 func (m *Master) readMeterSetting(n *node) bool {
-	data, err := m.bus.ReadInput(n.addr, regNodeEVMeter, 2)
+	data, err := m.bus.readInput(n.addr, regNodeEVMeter, 2)
 	if err != nil {
 		m.warn("reading EV meter setting failed", err, "node", n.id)
 		return false
@@ -548,7 +680,7 @@ func (m *Master) readMeterSetting(n *node) bool {
 			m.log.Info("node EV meter", "node", n.id, "meter", MeterName(typ), "address", addr)
 		}
 	}
-	if err := m.bus.WriteSingle(n.addr, regNodeCfgChanged, 0); err != nil {
+	if err := m.bus.writeSingle(n.addr, regNodeCfgChanged, 0); err != nil {
 		m.warn("clearing node config flag failed", err, "node", n.id)
 	}
 	return true
@@ -737,6 +869,8 @@ type MeterInfo struct {
 	Address   int        `json:"address"`
 	Polled    bool       `json:"polled"` // false: type not supported or not on the bus
 	Online    bool       `json:"online"` // last poll succeeded
+	Stale     bool       `json:"stale"`  // failed EVMeterStaleAfter times in a row: values are the last good ones (see ageSeconds)
+	Missed    int        `json:"missed"` // failed reads in a row
 	CurrentsA [3]float64 `json:"currentsA"`
 	PowerW    int        `json:"powerW"`
 	EnergyKWh float64    `json:"energyKWh"`  // meter total
@@ -745,17 +879,18 @@ type MeterInfo struct {
 
 // Snapshot is the externally visible state of the master.
 type Snapshot struct {
-	MainsA    [3]float64 `json:"mainsA"`
-	MainsV    [3]float64 `json:"mainsV"` // P1 voltage, 0 = not available (power uses 230 V)
-	MainsW    [3]int     `json:"mainsW"`
-	PowerW    int        `json:"powerW"` // total mains power, positive = import
-	MainsAge  float64    `json:"mainsAgeSeconds"`
-	Source    string     `json:"source"`
-	Fault     bool       `json:"fault"`
-	MaxMainsA int        `json:"maxMainsA"`
-	Cycles    uint64     `json:"cycles"`
-	CycleAge  float64    `json:"cycleAgeSeconds"` // since the last cycle started, -1 = none yet
-	Nodes     []NodeInfo `json:"nodes"`
+	MainsA    [3]float64  `json:"mainsA"`
+	MainsV    [3]float64  `json:"mainsV"` // P1 voltage, 0 = not available (power uses 230 V)
+	MainsW    [3]int      `json:"mainsW"`
+	PowerW    int         `json:"powerW"` // total mains power, positive = import
+	MainsAge  float64     `json:"mainsAgeSeconds"`
+	Source    string      `json:"source"`
+	Fault     bool        `json:"fault"`
+	MaxMainsA int         `json:"maxMainsA"`
+	Cycles    uint64      `json:"cycles"`
+	CycleAge  float64     `json:"cycleAgeSeconds"` // since the last cycle started, -1 = none yet
+	Nodes     []NodeInfo  `json:"nodes"`
+	Bus       []AddrStats `json:"bus"` // counters per bus address
 }
 
 // Snapshot returns the current state.
@@ -778,6 +913,10 @@ func (m *Master) Snapshot() Snapshot {
 	}
 	for _, n := range m.sortedNodes() {
 		s.Nodes = append(s.Nodes, m.nodeInfo(n))
+	}
+	s.Bus = m.bus.Stats()
+	for i := range s.Bus {
+		s.Bus[i].StaleEvents = m.stale[s.Bus[i].Addr]
 	}
 	return s
 }
@@ -821,7 +960,8 @@ func (m *Master) meterInfo(n *node) *MeterInfo {
 	}
 	_, supported := lookupMeter(mt.typ)
 	mi := &MeterInfo{
-		Type: MeterName(mt.typ), Address: mt.addr, Polled: supported && mt.addr > SensorboxAddr, Online: mt.ok,
+		Type: MeterName(mt.typ), Address: mt.addr, Polled: supported && mt.addr > SensorboxAddr,
+		Online: mt.answered && mt.fails == 0, Stale: mt.stale, Missed: mt.fails,
 		PowerW: mt.power, EnergyKWh: float64(mt.energy) / 1000, Age: -1,
 	}
 	for i, c := range mt.currents {

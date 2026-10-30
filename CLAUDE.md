@@ -75,7 +75,18 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   backoff 1 s doubling to 30 s, so a device missing at startup is handled like one
   lost later. The bus logs loss/recovery once; requests fail with ErrBusDown meanwhile,
   which the master does not log
-- bus.go: FC03/FC04 read, FC10/FC06 write, broadcast without reply
+- bus.go: FC03/FC04 read, FC10/FC06 write, broadcast without reply; request functions
+  unexported (only the master's cycle goroutine uses the bus). Per frame: flush input
+  (TCFLSH; late bytes counted), silence ≥ max(3.5 chars, -inter-frame-delay 30 ms) since
+  the last frame end (+ -broadcast-turnaround 100 ms after a broadcast), tcdrain after
+  write, TX end = max(drain return, start + frame time), response timeout from TX end,
+  frame complete by length or 5-byte exception (never by inter-character pause), answer
+  from another address = ErrFrame. Errors: ErrTimeout / ErrFrame (retryable) /
+  ErrException. -bus-trace logs every frame (gap, TX time, first byte, result).
+  busstats.go: counters per address (tx, ok, timeout, crc, exception, retryOk, lateBytes,
+  latency p50/p99) in /api/state .bus. Bus clock: real, or virtual for the simulator
+  (NewSimBus: gaps and timeouts cost no real time; the Sim counts requests that start
+  < 3.5 chars after the previous frame as merged and does not answer them)
 - sensorbox.go: decode P1/CT, plausibility checks; power per phase in W (P1: V × I
   when 180-270 V, else I × 230)
 - evmeter.go: EMConfig port (all Modbus meter types usable as EV meter; not Sensorbox,
@@ -85,8 +96,15 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   processAllNodeStates + per-node external limit (Max) from evcc
 - master.go: 2 s cycle, node handles with evcc-shaped methods
   (Status, Enabled, Enable, MaxCurrent, MaxCurrentMillis), Snapshot for an API.
-  After the broadcast: one online node's EV meter per cycle, round robin (current,
-  energy, power if not in the current answer); readings in NodeInfo.Meter.
+  After the broadcast: EV meters, each every -evmeter-every (2) cycles, round robin
+  (current, energy, power if not in the current answer), only while ≥ 600 ms of the
+  cycle is left (else stays due, debug log); one retry on timeout/frame error, not on an
+  exception. Timeout: -evmeter-timeout or max(answer time + 100 ms, 2 × p99, -timeout).
+  One failure = debug; -evmeter-stale-after (3) failed polls in a row = WARN, meter
+  .stale with last values and age, INFO with missed count on recovery. Readings are
+  rejected (WARN once) for |I| > 100 A, energy going down or rising faster than
+  capA × 3 × 250 V × 1.5 + 50 Wh. Readings in NodeInfo.Meter. A cycle longer than
+  Interval logs WARN and skips the next tick.
   syncAccess: pauses nodes evcc disabled (access register), see deviation 5.
   Phases1p3p / GetPhases (evcc PhaseSwitcher / PhaseGetter): sets enable_C2 via the
   node's REST API; a charging node whose setting changed is held paused (same access
@@ -107,7 +125,10 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   ChargeDelay, COMM_TIMEOUT, access (setAccess), EV meter listening and COMM_EVTIMEOUT;
   contactor 2 (switched on entering C) and the node REST API as http.RoundTripper
   (host "node<id>", WebBusy for 503s)
-- scenario_test.go: 24 scenarios; soak_test.go: 20 seeds × 2 h random events;
+- scenario_test.go: 24 scenarios (every cycle also checks no merged frames);
+  bus_timing_test.go: gaps + single transport user under concurrent API calls, late
+  reply flushed, EV meter budget (dead meters never move the broadcast or overrun),
+  retry/stale/implausible, merged frame in the Sim; soak_test.go: 20 seeds × 2 h random events;
   evmeter_test.go: request frames per type, decode vectors (incl. one from the real bus)
 
 Deliberate deviations from the firmware (all found by the simulator):
@@ -141,7 +162,9 @@ old (Timer2S + poll), so a load step is corrected a cycle later than over the bu
 
 Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
-  -nodes id:maxA[:host], -stale (11 s), -ct200, -sensorbox-host, -default-enabled (default false), -sim, -log-level), SIGTERM
+  -nodes id:maxA[:host], -stale (11 s), -ct200, -sensorbox-host, -default-enabled (default false), -sim, -log-level,
+  -timeout, -inter-frame-delay, -broadcast-turnaround, -evmeter-every, -evmeter-timeout,
+  -evmeter-stale-after, -bus-trace), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
 - api.go: GET /api/state (evcc grid meter: .powerW, .mainsA, error on .fault), GET /api/nodes/{id} (evcc jq .status / .enabled /
   .meter.powerW / .meter.energyKWh; .access on/pause/off; status "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
@@ -165,6 +188,11 @@ real hardware (node timing, pause, EV meters, 1P/3P), Docker build (docker8).
 
 TODO:
 1. Later: port to evcc as `charger/smartevse-master.go` (one master, N chargers).
+2. EV meter timeouts (always 0 bytes, ~384 s period per meter, fixed sub-second phase):
+   the code had one bus goroutine on a 2 s ticker already, so the drifting period is not
+   in this daemon (likely inside the meters). Run 30 min with -bus-trace on hardware,
+   then 24 h: check .bus timeout / retryOk / lateBytes / latency per address. lateBytes
+   rising with the timeouts = meter answers after the timeout → raise -evmeter-timeout.
 
 ## Conventions
 

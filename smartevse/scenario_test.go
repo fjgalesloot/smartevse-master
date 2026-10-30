@@ -38,8 +38,7 @@ func newHarness(t *testing.T, mutate ...func(*Config)) *harness {
 	sim := NewSim(1, 2)
 	sim.House = [3]float64{5, 5, 5}
 
-	bus := NewBus(sim)
-	bus.BroadcastGap = 0
+	bus := NewSimBus(sim)
 
 	level := slog.LevelError
 	var w io.Writer = io.Discard
@@ -90,6 +89,9 @@ func (h *harness) runUntil(max time.Duration, what string, cond func() bool) tim
 // check enforces invariants that must hold at all times.
 func (h *harness) check() {
 	h.t.Helper()
+	if h.sim.Merged > 0 {
+		h.t.Fatalf("%d requests sent without the 3.5 character gap", h.sim.Merged)
+	}
 	for id := 1; id <= 2; id++ {
 		n := h.sim.Node(id)
 		if n.State != StateC || n.Offline {
