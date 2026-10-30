@@ -12,7 +12,7 @@
 # 1p/3p switching goes through smartevse-master.galesloot-ict.local, which sets Contactor 2 on the node
 # over the node's WiFi REST API (Modbus cannot reach it): "Always Off" = 1P,
 # "Always On" = 3P. Needs a second contactor wired to C2 and the node's host in
-# smartevse-master.galesloot-ict.local's -nodes (id:maxA:host). The node only switches C2 when charging
+# smartevse-master.galesloot-ict.local's -nodes (id:host). The node only switches C2 when charging
 # (re)starts, so smartevse-master.galesloot-ict.local pauses a charging node until it has stopped and then
 # lets it restart, as evcc's own smart-evse driver does (hence tos: true: evcc
 # itself does not pause around a switch). Each switch is a flash write on the
@@ -109,7 +109,7 @@ chargers:
         jq: .meter.currentsA[2]
         timeout: 5s
     tos: true # evcc does not pause around a switch; smartevse-master.galesloot-ict.local does
-    phases1p3p: # optional, needs -nodes 1:16:<host>; retries while the node's web server is busy
+    phases1p3p: # optional, needs -nodes 1:<host>; retries while the node's web server is busy
       source: http
       method: POST
       uri: http://smartevse-master.galesloot-ict.local:7090/api/nodes/1/phases?value={{.phases}}

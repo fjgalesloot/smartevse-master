@@ -34,7 +34,7 @@ func run() error {
 		maxMains       = flag.Int("max-mains", 0, "max mains current per phase in A (required)")
 		maxCircuit     = flag.Int("max-circuit", 0, "max current per phase for all EVSEs together in A, 0 = disabled")
 		minCurrent     = flag.Int("min-current", 6, "minimum charge current in A")
-		nodes          = flag.String("nodes", "1:16,2:16", "nodes as id:maxA[:host], comma separated (id = Load Balancing setting 1..7, host = WiFi address for 1P/3P switching)")
+		nodes          = flag.String("nodes", "1,2", "nodes as id[:host], comma separated (id = Load Balancing setting 1..7, host = WiFi address for 1P/3P switching); each node's max current is its own MAX setting")
 		stale          = flag.Duration("stale", 11*time.Second, "mains data older than this stops all nodes (firmware: 11s)")
 		ct200          = flag.Bool("ct200", false, "Sensorbox CTs are 200A:50mA")
 		sensorboxHost  = flag.String("sensorbox-host", "", "Sensorbox-2 WiFi address: mains from its REST API while it does not answer on the bus")
@@ -176,8 +176,9 @@ func advanceSim(ctx context.Context, sim *smartevse.Sim) {
 	}
 }
 
-// parseNodes parses "1:16:smartevse1,2:16" into node configs. The host may
-// carry a port (1:16:smartevse1:8080).
+// parseNodes parses "1:smartevse1,2" into node configs. The host may carry a
+// port (1:smartevse1:8080). The old id:maxA[:host] form is refused, so it is
+// not taken for a host named "16".
 func parseNodes(s string) ([]smartevse.NodeConfig, error) {
 	var nodes []smartevse.NodeConfig
 	for _, part := range strings.Split(s, ",") {
@@ -185,23 +186,28 @@ func parseNodes(s string) ([]smartevse.NodeConfig, error) {
 		if part == "" {
 			continue
 		}
-		fields := strings.SplitN(part, ":", 3)
-		if len(fields) < 2 {
-			return nil, fmt.Errorf("node %q: want id:maxA[:host]", part)
-		}
+		fields := strings.SplitN(part, ":", 2)
 		id, err := strconv.Atoi(fields[0])
 		if err != nil {
 			return nil, fmt.Errorf("node %q: id: %w", part, err)
 		}
-		max, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return nil, fmt.Errorf("node %q: max: %w", part, err)
-		}
-		nc := smartevse.NodeConfig{ID: id, MaxA: max}
-		if len(fields) == 3 {
-			nc.Host = fields[2]
+		nc := smartevse.NodeConfig{ID: id}
+		if len(fields) == 2 {
+			nc.Host = fields[1]
+			if first, _, _ := strings.Cut(nc.Host, ":"); first == "" || isDigits(first) {
+				return nil, fmt.Errorf("node %q: want id[:host]; the max current comes from the node's own setting now", part)
+			}
 		}
 		nodes = append(nodes, nc)
 	}
 	return nodes, nil
+}
+
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }

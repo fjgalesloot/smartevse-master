@@ -14,7 +14,6 @@ import (
 // NodeConfig describes one SmartEVSE configured as "Node <ID>".
 type NodeConfig struct {
 	ID   int    // 1..7, the Load Balancing setting on the unit (Node 1 = Modbus address 2)
-	MaxA int    // hard cap in A, applied on top of what the node reports
 	Host string // WiFi host name or address of the unit, for 1P/3P switching; "" = none
 }
 
@@ -37,10 +36,12 @@ type Config struct {
 // Interval is the control cycle, same as the firmware.
 const Interval = 2 * time.Second
 
+// maxNodeA is the most any node gets (A), the clamp in the firmware's SetCurrent.
+const maxNodeA = 80
+
 type node struct {
 	id      int
 	addr    byte
-	capA    int
 	online  int // countdown, 5 = just seen
 	state   int
 	err     int
@@ -147,15 +148,12 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 		if nc.ID < 1 || nc.ID > 7 {
 			return nil, fmt.Errorf("node id %d out of range 1..7", nc.ID)
 		}
-		if nc.MaxA < cfg.MinCurrent || nc.MaxA > 80 {
-			return nil, fmt.Errorf("node %d: max %d A out of range %d..80", nc.ID, nc.MaxA, cfg.MinCurrent)
-		}
 		if _, dup := m.nodes[nc.ID]; dup {
 			return nil, fmt.Errorf("node %d configured twice", nc.ID)
 		}
 		m.nodes[nc.ID] = &node{
-			id: nc.ID, addr: byte(nc.ID + 1), capA: nc.MaxA,
-			enabled: cfg.DefaultEnabled, limit: nc.MaxA * 10, cfgChanged: true,
+			id: nc.ID, addr: byte(nc.ID + 1),
+			enabled: cfg.DefaultEnabled, limit: maxNodeA * 10, cfgChanged: true,
 			host: nc.Host, c2: -1,
 			meterDue: uint64(1 + i%cfg.EVMeterEvery), // spread the meters over the cycles
 		}
@@ -383,8 +381,6 @@ func (m *Master) currentReason(n *node, b int) string {
 		return "evcc limit"
 	case b == n.maxA*10:
 		return "node max"
-	case b == n.capA*10:
-		return "configured max"
 	}
 	return "balancer"
 }
@@ -639,7 +635,11 @@ func (m *Master) plausible(n *node, currents [3]int, energy int) error {
 			float64(mt.energy)/1000, float64(energy)/1000)
 	}
 	dt := m.cycleAt.Sub(mt.at)
-	maxWh := float64(n.capA*3*maxPhaseVolts)*dt.Hours()*1.5 + energySlackWh
+	capA := n.maxA
+	if capA <= 0 || capA > maxNodeA {
+		capA = maxNodeA
+	}
+	maxWh := float64(capA*3*maxPhaseVolts)*dt.Hours()*1.5 + energySlackWh
 	if rise := energy - mt.energy; float64(rise) > maxWh {
 		return fmt.Errorf("%w: energy rose %d Wh in %v, at most %.0f Wh possible", errImplausible, rise, dt, maxWh)
 	}
@@ -715,18 +715,15 @@ func (m *Master) allowed(n *node) bool {
 	return n.enabled && n.limit >= m.cfg.MinCurrent*10 && n.hold.IsZero()
 }
 
-// effectiveMax is the most a node may ever get: the lowest of what the node
-// reports, the configured cap and the evcc limit. Nodes do not enforce their
-// own maximum when driven by a master, so this is the safety cap.
+// effectiveMax is the most a node may ever get: the lower of its own max
+// setting (reg 0x0007) and the evcc limit. Nodes do not enforce their own
+// maximum when driven by a master, so this is the safety cap. Until the node
+// has reported its setting it gets nothing.
 func (m *Master) effectiveMax(n *node) int {
-	if !m.allowed(n) {
+	if !m.allowed(n) || n.maxA <= 0 {
 		return 0
 	}
-	max := n.capA * 10
-	if n.maxA > 0 {
-		max = min(max, n.maxA*10)
-	}
-	return min(max, n.limit)
+	return min(min(n.maxA, maxNodeA)*10, n.limit)
 }
 
 func (m *Master) sortedNodes() []*node {
@@ -794,7 +791,7 @@ func (h *Node) MaxCurrent(current int64) error {
 
 // MaxCurrentMillis sets the evcc limit in A with 0.1 A resolution.
 func (h *Node) MaxCurrentMillis(current float64) error {
-	if current < 0 || current > 80 {
+	if current < 0 || current > maxNodeA {
 		return fmt.Errorf("current %.1f A out of range", current)
 	}
 	h.m.mu.Lock()
@@ -804,7 +801,7 @@ func (h *Node) MaxCurrentMillis(current float64) error {
 }
 
 // ErrNoHost is returned for 1P/3P switching on a node without a WiFi host.
-var ErrNoHost = errors.New("no host configured for this node (-nodes id:maxA:host)")
+var ErrNoHost = errors.New("no host configured for this node (-nodes id:host)")
 
 // Phases1p3p switches the node between 1 and 3 phases through contactor 2
 // (evcc api.PhaseSwitcher). The setting goes to the node's WiFi REST API;

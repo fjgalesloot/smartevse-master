@@ -13,7 +13,8 @@ stays enforced outside evcc. Goal: later port `smartevse/` into evcc as a charge
 - Nodes stop charging (`CT_NOCOMM`) when no broadcast arrives for ~11 s
   (`COMM_TIMEOUT`) → built-in fail-safe if this daemon dies.
 - Nodes trust the master blindly: `SetCurrent()` only clamps to 80 A. This master MUST
-  cap each node at its reported max (reg 0x0007) and the configured hard cap.
+  cap each node at its reported max (reg 0x0007, the node's MAX setting; no current
+  before it is known). There is no per-node max in the master's own config.
 - Nodes never poll their own EV meter: the master does (ModbusRequestLoop states 3-5,
   20) and the node listens to the answers (`MBEVMeterResponse`). Without it a node with
   an EV meter set gets EV_NOCOMM after 64 s (`COMM_EVTIMEOUT`, ~11 s after boot or a
@@ -168,7 +169,7 @@ old (Timer2S + poll), so a load step is corrected a cycle later than over the bu
 
 Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
-  -nodes id:maxA[:host], -stale (11 s), -ct200, -sensorbox-host, -default-enabled (default false), -sim, -log-level,
+  -nodes id[:host], -stale (11 s), -ct200, -sensorbox-host, -default-enabled (default false), -sim, -log-level,
   -timeout, -inter-frame-delay, -broadcast-turnaround, -evmeter-every, -evmeter-timeout,
   -evmeter-stale-after, -bus-trace), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).

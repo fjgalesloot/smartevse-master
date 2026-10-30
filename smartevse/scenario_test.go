@@ -28,7 +28,7 @@ func newHarness(t *testing.T, mutate ...func(*Config)) *harness {
 	cfg := Config{
 		MaxMains:       25,
 		MinCurrent:     6,
-		Nodes:          []NodeConfig{{ID: 1, MaxA: 16, Host: "node1"}, {ID: 2, MaxA: 16, Host: "node2"}},
+		Nodes:          []NodeConfig{{ID: 1, Host: "node1"}, {ID: 2, Host: "node2"}},
 		DefaultEnabled: true,
 	}
 	for _, f := range mutate {
@@ -98,7 +98,7 @@ func (h *harness) check() {
 			continue // a node cut off from the bus cannot be corrected; it stops on its timeout
 		}
 		info := h.m.Node(id).Info()
-		limit := math.Min(float64(n.MaxA), float64(h.cfg.Nodes[id-1].MaxA))
+		limit := float64(n.MaxA)
 		if info.LimitA > 0 {
 			limit = math.Min(limit, info.LimitA)
 		}
@@ -207,8 +207,8 @@ func TestScenarioEvccLimit(t *testing.T) {
 	near(t, "node 2 takes rest", h.amps(2), 14, 0.5)
 }
 
-// The node reports a lower maximum than configured: the master must respect it,
-// because a node does not enforce its own maximum when driven by a master.
+// The node's own maximum is the cap: the master must respect it, because a
+// node does not enforce its own maximum when driven by a master.
 func TestScenarioNodeReportedMaxIsRespected(t *testing.T) {
 	h := newHarness(t, func(c *Config) { c.MaxMains = 40 })
 	h.sim.Node(1).MaxA = 10
