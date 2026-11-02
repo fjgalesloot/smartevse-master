@@ -48,6 +48,8 @@ func run() error {
 		simulate       = flag.Bool("sim", false, "run against a simulated bus in real time (no hardware)")
 		sniff          = flag.Bool("sniff", false, "only listen on -port and print all traffic, never transmit (diagnostics)")
 		logLevel       = flag.String("log-level", "info", "debug, info, warn or error")
+		uiLogLevel     = flag.String("ui-log-level", "debug", "lowest level kept for the web UI's log view: debug, info, warn or error")
+		uiLogLines     = flag.Int("ui-log-lines", 5000, "log lines kept in memory for the web UI")
 		showVersion    = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
@@ -61,7 +63,15 @@ func run() error {
 	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
 		return fmt.Errorf("log level: %w", err)
 	}
-	log := slog.New(newLogHandler(os.Stderr, level))
+	var uiLevel slog.Level
+	if err := uiLevel.UnmarshalText([]byte(*uiLogLevel)); err != nil {
+		return fmt.Errorf("ui log level: %w", err)
+	}
+	logs := newLogRing(*uiLogLines)
+	log := slog.New(teeHandler{
+		newLogHandler(os.Stderr, level),
+		&ringHandler{ring: logs, level: uiLevel},
+	})
 	slog.SetDefault(log)
 	log.Info("smartevse-master", "version", buildVersion())
 
@@ -129,9 +139,14 @@ func run() error {
 		m.SetHTTPTransport(sim)
 	}
 
+	a := newAPI(m, sim, log)
+	a.logs = logs
+	flag.VisitAll(func(f *flag.Flag) {
+		a.settings = append(a.settings, [2]string{f.Name, f.Value.String()})
+	})
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           newAPI(m, sim, log).routes(),
+		Handler:           a.routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errc := make(chan error, 1)

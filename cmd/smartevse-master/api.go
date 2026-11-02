@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fjgalesloot/smartevse-master/smartevse"
 )
@@ -17,14 +18,21 @@ type api struct {
 	m   *smartevse.Master
 	sim *smartevse.Sim // nil unless -sim
 	log *slog.Logger
+
+	// web UI
+	act      *activity
+	logs     *logRing    // nil = no log view
+	settings [][2]string // command line settings shown in the UI
+	started  time.Time
 }
 
 func newAPI(m *smartevse.Master, sim *smartevse.Sim, log *slog.Logger) *api {
-	return &api{m: m, sim: sim, log: log}
+	return &api{m: m, sim: sim, log: log, act: newActivity(), started: time.Now()}
 }
 
 func (a *api) routes() http.Handler {
 	mux := http.NewServeMux()
+	a.uiRoutes(mux)
 	mux.HandleFunc("GET /api/state", a.state)
 	mux.HandleFunc("GET /api/nodes/{id}", a.nodeInfo)
 	mux.HandleFunc("POST /api/nodes/{id}/enable", a.nodeEnable)
@@ -38,12 +46,15 @@ func (a *api) routes() http.Handler {
 		mux.HandleFunc("POST /api/sim/sensorbox", a.simSensorbox)
 		mux.HandleFunc("POST /api/sim/nodes/{id}", a.simNode)
 	}
-	return a.logRequests(mux)
+	return a.logRequests(a.act.middleware(mux))
 }
 
+// logRequests logs API requests at debug level; the web UI's own polling is left out.
 func (a *api) logRequests(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.log.Debug("http", "method", r.Method, "uri", r.URL.RequestURI())
+		if !uiPath(r.URL.Path) {
+			a.log.Debug("http", "method", r.Method, "uri", r.URL.RequestURI())
+		}
 		h.ServeHTTP(w, r)
 	})
 }
@@ -59,15 +70,22 @@ func (a *api) state(w http.ResponseWriter, r *http.Request) {
 
 // healthz fails when the control loop is stuck or the mains measurement is lost.
 func (a *api) healthz(w http.ResponseWriter, r *http.Request) {
-	s := a.m.Snapshot()
+	if msg := unhealthy(a.m.Snapshot()); msg != "" {
+		http.Error(w, msg, http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintln(w, "ok")
+}
+
+// unhealthy returns why the master is not healthy, "" when it is.
+func unhealthy(s smartevse.Snapshot) string {
 	switch {
 	case s.CycleAge < 0 || s.CycleAge > 3*smartevse.Interval.Seconds():
-		http.Error(w, fmt.Sprintf("control loop stalled (last cycle %.0f s ago)", s.CycleAge), http.StatusServiceUnavailable)
+		return fmt.Sprintf("control loop stalled (last cycle %.0f s ago)", s.CycleAge)
 	case s.Fault:
-		http.Error(w, "mains measurement lost", http.StatusServiceUnavailable)
-	default:
-		fmt.Fprintln(w, "ok")
+		return "mains measurement lost"
 	}
+	return ""
 }
 
 func (a *api) node(w http.ResponseWriter, r *http.Request) *smartevse.Node {
