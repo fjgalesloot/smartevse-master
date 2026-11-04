@@ -180,6 +180,13 @@ Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
   /api/sim/sensorbox?offline=&weboffline=&p1lost=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=&access=
   (access=on|pause|off as if changed on the node).
+- Web UI (ui.go, ui/index.html embedded, no JS deps): GET / (or /ui) polls GET /api/ui
+  (version, uptime, health, settings, Snapshot, evcc activity, sim state) and
+  GET /api/ui/logs?after=seq&limit= every 2 s. Read-only. activity.go records every API
+  request except the UI's own (ring of 300: time, remote, URI, status, ms, response
+  ≤ 4 KB) plus the last enable/current/phases/read per node and the last /api/state read.
+  logring.go: teeHandler sends records to stderr (-log-level) and an in-memory ring
+  (-ui-log-level, default debug; -ui-log-lines, default 5000).
 - .github/workflows/docker.yml: go vet + test, then buildx amd64/arm64/arm/v7 to
   ghcr.io/fjgalesloot/smartevse-master (main → :latest/:main/:sha-x, tag v1.2.3 → :1.2.3/:1.2;
   PRs build only; docs/examples-only changes skip). Version = git describe, passed as

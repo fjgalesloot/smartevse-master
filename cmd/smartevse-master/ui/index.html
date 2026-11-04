@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartEVSE master</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #fff; --text: #1d2330; --muted: #6b7385; --line: #e2e5ea;
+  --accent: #2d6cdf; --ok: #1f9d55; --warn: #c27c0e; --bad: #d64545; --info: #2d6cdf;
+  --bar: #dfe6f3; --code: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1b2029; --text: #e3e7ee; --muted: #8a93a6; --line: #2b323e;
+    --accent: #6ea0ff; --ok: #3fbf74; --warn: #e0a43a; --bad: #ef6b6b; --info: #6ea0ff;
+    --bar: #2a3342; --code: #232a35;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+header h1 { font-size: 17px; margin: 0; }
+header .meta { color: var(--muted); font-size: 13px; display: flex; gap: 14px; flex-wrap: wrap; }
+header .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+main { padding: 16px; max-width: 1500px; margin: 0 auto; display: grid; gap: 16px; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+section.card h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+section.card h2 .sub { color: var(--muted); font-weight: normal; font-size: 13px; }
+section.card h3 { font-size: 13px; margin: 12px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  border: 1px solid currentColor; white-space: nowrap; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); } .info { color: var(--info); }
+table { border-collapse: collapse; width: 100%; }
+td, th { text-align: left; padding: 3px 8px 3px 0; vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+table.kv td:first-child { color: var(--muted); width: 42%; }
+table.list { font-size: 13px; }
+table.list tr + tr td { border-top: 1px solid var(--line); }
+table.list td, table.list th { padding: 4px 10px 4px 0; }
+.num { font-variant-numeric: tabular-nums; }
+.big { font-size: 26px; font-weight: 650; }
+.phase { display: grid; grid-template-columns: 28px 1fr auto; gap: 8px; align-items: center; margin: 6px 0; }
+.bar { height: 14px; background: var(--bar); border-radius: 7px; overflow: hidden; position: relative; }
+.bar > i { position: absolute; top: 0; bottom: 0; left: 0; background: var(--accent); border-radius: 7px; }
+.bar > i.neg { background: var(--ok); }
+.bar > i.hot { background: var(--bad); }
+.bar > b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--bad); }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.resp { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--muted); }
+.resp.open { white-space: pre-wrap; word-break: break-all; overflow: visible; color: var(--text); }
+.tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+input, select, button { font: inherit; font-size: 13px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
+button { cursor: pointer; } button:hover { border-color: var(--accent); }
+label { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); font-size: 13px; }
+#log { height: 480px; overflow: auto; background: var(--code); border-radius: 8px; padding: 6px 8px; }
+#log div { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; padding: 1px 0; }
+#log .t { color: var(--muted); } #log .k { color: var(--muted); } #log .n { color: var(--accent); font-weight: 600; }
+#log .DEBUG .l { color: var(--muted); } #log .INFO .l { color: var(--info); }
+#log .WARN .l { color: var(--warn); } #log .ERROR .l { color: var(--bad); }
+#log .WARN { background: color-mix(in srgb, var(--warn) 8%, transparent); }
+#log .ERROR { background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.scroll { overflow-x: auto; }
+.nodes { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.status { font-size: 22px; font-weight: 700; width: 38px; height: 38px; border-radius: 8px; display: inline-flex;
+  align-items: center; justify-content: center; border: 2px solid currentColor; }
+.nodehead { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+.nodehead .desc { color: var(--muted); }
+details summary { cursor: pointer; color: var(--muted); }
+#conn { font-size: 12px; }
+@media (max-width: 600px) { .phase { grid-template-columns: 24px 1fr auto; font-size: 12px; } .nodes, .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>SmartEVSE master</h1>
+  <span id="health" class="pill muted">…</span>
+  <span id="mode" class="pill muted"></span>
+  <div class="meta">
+    <span>version <b id="version">–</b></span>
+    <span>up <b id="uptime">–</b></span>
+    <span>cycles <b id="cycles" class="num">–</b></span>
+    <span>last cycle <b id="cycleAge">–</b></span>
+  </div>
+  <div class="right">
+    <span id="conn" class="muted"></span>
+    <button id="pause" title="Stop/start refreshing">Pause</button>
+  </div>
+</header>
+
+<main>
+  <div class="grid">
+    <section class="card" id="mainsCard">
+      <h2>Mains <span class="sub" id="mainsSub"></span></h2>
+      <div class="big num" id="power">–</div>
+      <div id="phases"></div>
+      <table class="kv" id="mainsKv"></table>
+    </section>
+
+    <section class="card">
+      <h2>evcc <span id="evccPill" class="pill muted">–</span></h2>
+      <table class="kv" id="evccKv"></table>
+      <h3>Last request</h3>
+      <div id="evccLast" class="muted">none yet</div>
+    </section>
+  </div>
+
+  <div class="nodes" id="nodes"></div>
+
+  <section class="card" id="simCard" hidden>
+    <h2>Simulator <span class="sub">real values inside the simulation</span></h2>
+    <div class="scroll"><table class="list" id="simTable"></table></div>
+    <table class="kv" id="simKv" style="margin-top:8px"></table>
+  </section>
+
+  <section class="card">
+    <h2>API requests <span class="sub">evcc and other clients (not this page), newest first</span></h2>
+    <div class="tools">
+      <label>kind <select id="reqKind">
+        <option value="">all</option>
+        <option value="commands">commands only (enable, current, phases)</option>
+        <option value="state">state (grid meter)</option>
+        <option value="node">node reads</option>
+        <option value="health">health</option>
+        <option value="sim">sim</option>
+        <option value="errors">errors (≥ 400)</option>
+      </select></label>
+      <label>node <select id="reqNode"><option value="">all</option></select></label>
+      <span class="muted" id="reqCount"></span>
+    </div>
+    <div class="scroll"><table class="list" id="reqTable"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Log <span class="sub" id="logSub"></span></h2>
+    <div class="tools">
+      <label>level <select id="logLevel">
+        <option value="DEBUG">debug</option>
+        <option value="INFO" selected>info</option>
+        <option value="WARN">warn</option>
+        <option value="ERROR">error</option>
+      </select></label>
+      <label>node <select id="logNode"><option value="">all</option><option value="-">without node</option></select></label>
+      <label>filter <input id="logFilter" placeholder="text or /regex/" size="22"></label>
+      <label><input type="checkbox" id="logFollow" checked> follow</label>
+      <button id="logClear" title="Hide the lines shown so far">Clear</button>
+      <button id="logSave" title="Download the lines that match the filter">Download</button>
+      <span class="muted" id="logCount"></span>
+    </div>
+    <div id="log"></div>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Bus <span class="sub">per address, since start</span></h2>
+      <div class="scroll"><table class="list" id="busTable"></table></div>
+    </section>
+    <section class="card">
+      <h2>Settings <span class="sub">command line</span></h2>
+      <div class="scroll"><table class="kv" id="settings"></table></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = (v, d = 1) => (v === undefined || v === null || Number.isNaN(v)) ? "–" : Number(v).toFixed(d);
+const pad = n => String(n).padStart(2, "0");
+const clock = t => { const d = new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+const clockMs = t => { const d = new Date(t); return `${clock(t)}.${String(d.getMilliseconds()).padStart(3, "0")}`; };
+function dur(s) {
+  if (s === undefined || s === null || s < 0) return "–";
+  if (s < 10) return s.toFixed(1) + " s";
+  if (s < 90) return Math.round(s) + " s";
+  if (s < 5400) return Math.round(s / 60) + " min";
+  if (s < 172800) return (s / 3600).toFixed(1) + " h";
+  return (s / 86400).toFixed(1) + " d";
+}
+let serverSkew = 0; // server clock - browser clock, ms
+const ago = t => t ? dur((Date.now() + serverSkew - new Date(t).getTime()) / 1000) + " ago" : "never";
+const kv = rows => rows.filter(Boolean).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join("");
+
+const statusText = { A: "no car", B: "car connected", C: "charging", offline: "offline" };
+const statusClass = { A: "muted", B: "info", C: "ok", offline: "bad" };
+const stateText = {
+  A: "A – no car", B: "B – connected", C: "C – charging", D: "D – charging, ventilation",
+  COMM_B: "COMM_B – asks to connect", COMM_B_OK: "COMM_B_OK – connect confirmed",
+  COMM_C: "COMM_C – asks to charge", COMM_C_OK: "COMM_C_OK – charge confirmed",
+  ACTIVATION: "activation mode", B1: "B1 – connected, no PWM", C1: "C1 – stopping",
+};
+const errorBits = [[1, "LESS_6A"], [2, "CT_NOCOMM"], [4, "TEMP_HIGH"], [8, "EV_NOCOMM"], [16, "RCD"]];
+const errors = e => e ? `<span class="bad">${errorBits.filter(([b]) => e & b).map(([, n]) => n).join(", ") || e}</span>` : `<span class="ok">none</span>`;
+const yes = (b, good = true) => b ? `<span class="${good ? "ok" : "warn"}">yes</span>` : `<span class="${good ? "muted" : "ok"}">no</span>`;
+const httpClass = c => c >= 500 ? "bad" : c >= 400 ? "warn" : "ok";
+
+let paused = false, last = null;
+
+// ---- state -----------------------------------------------------------------
+async function poll() {
+  if (paused) return;
+  try {
+    const r = await fetch("api/ui", { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status + " " + r.statusText);
+    const d = await r.json();
+    serverSkew = new Date(d.now).getTime() - Date.now();
+    last = d;
+    render(d);
+    $("conn").textContent = "updated " + clock(Date.now());
+    $("conn").className = "muted";
+  } catch (e) {
+    $("conn").textContent = "no connection: " + e.message;
+    $("conn").className = "bad";
+  }
+}
+
+function render(d) {
+  const s = d.state;
+  $("version").textContent = d.version;
+  $("uptime").textContent = dur(d.uptimeSeconds);
+  $("cycles").textContent = s.cycles;
+  $("cycleAge").textContent = s.cycleAgeSeconds < 0 ? "none yet" : dur(s.cycleAgeSeconds) + " ago";
+  $("health").textContent = d.healthy ? "healthy" : d.health;
+  $("health").className = "pill " + (d.healthy ? "ok" : "bad");
+  $("mode").textContent = d.sim ? "SIMULATOR" : "hardware";
+  $("mode").className = "pill " + (d.sim ? "warn" : "muted");
+  document.title = (d.healthy ? "" : "⚠ ") + "SmartEVSE master";
+  renderMains(s);
+  renderEvcc(d);
+  renderNodes(d);
+  renderSim(d);
+  renderRequests(d);
+  renderBus(s);
+  $("settings").innerHTML = kv((d.settings || []).map(([k, v]) => [k, `<code>${esc(v) || '<span class="muted">""</span>'}</code>`]));
+  $("logSub").textContent = `last ${d.logBuffer} lines kept in memory`;
+}
+
+function renderMains(s) {
+  const max = s.maxMainsA || 25;
+  $("power").innerHTML = `${(s.powerW / 1000).toFixed(2)} kW <span class="muted" style="font-size:14px;font-weight:normal">${s.powerW >= 0 ? "import" : "export"}</span>`;
+  const scale = max * 1.25;
+  $("phases").innerHTML = s.mainsA.map((a, i) => {
+    const w = Math.min(100, Math.abs(a) / scale * 100);
+    const cls = a < 0 ? "neg" : a > max ? "hot" : "";
+    const v = s.mainsV[i] ? ` · ${fmt(s.mainsV[i], 0)} V` : "";
+    return `<div class="phase"><b>L${i + 1}</b><div class="bar"><i class="${cls}" style="width:${w}%"></i><b style="left:${max / scale * 100}%" title="max mains ${max} A"></b></div>
+      <span class="num">${fmt(a)} A · ${s.mainsW[i]} W${v}</span></div>`;
+  }).join("");
+  const age = s.mainsAgeSeconds;
+  $("mainsSub").textContent = `max ${max} A per phase`;
+  $("mainsKv").innerHTML = kv([
+    ["source", esc(s.source || "–")],
+    ["measured", age < 0 ? '<span class="bad">never</span>' : `<span class="${age > 6 ? "warn" : ""}">${dur(age)} ago</span>`],
+    ["fault (mains lost)", s.fault ? '<span class="bad">YES – all nodes stopped</span>' : '<span class="ok">no</span>'],
+  ]);
+}
+
+function renderEvcc(d) {
+  const e = d.evcc;
+  const lastAge = e.last ? (Date.now() + serverSkew - new Date(e.last.time).getTime()) / 1000 : -1;
+  const pill = $("evccPill");
+  if (!e.last) { pill.textContent = "no requests yet"; pill.className = "pill muted"; }
+  else if (lastAge < 60) { pill.textContent = "active"; pill.className = "pill ok"; }
+  else { pill.textContent = "silent for " + dur(lastAge); pill.className = "pill warn"; }
+  const counts = Object.entries(e.counts || {}).sort().map(([k, v]) => `${esc(k)} ${v}`).join(" · ");
+  const sr = e.stateRead;
+  $("evccKv").innerHTML = kv([
+    ["grid meter read (/api/state)", sr ? `${ago(sr.time)} <span class="muted">from ${esc(sr.remote)}</span>` : '<span class="muted">never</span>'],
+    ["requests", `${e.total} <span class="muted">${counts}</span>`],
+    ["errors (≥ 400)", e.errors ? `<span class="warn">${e.errors}</span>` : "0"],
+  ]);
+  if (e.last) {
+    const c = e.last;
+    $("evccLast").innerHTML = `<div><span class="${httpClass(c.status)}">${c.status}</span> <b>${esc(c.method)}</b> <code>${esc(c.uri)}</code></div>
+      <div class="muted">${clock(c.time)} (${ago(c.time)}) from ${esc(c.remote)} · ${fmt(c.durationMs, 1)} ms</div>
+      <div class="resp mono" title="click to expand">${esc(c.response)}</div>`;
+  }
+}
+
+function cmd(c, unit = "") {
+  if (!c) return '<span class="muted">never</span>';
+  const val = c.value !== undefined && c.value !== "" ? `<b>${esc(c.value)}${unit}</b> ` : "";
+  const err = c.status >= 400 ? ` <span class="${httpClass(c.status)}">${c.status} ${esc(c.error)}</span>` : "";
+  return `${val}<span class="muted">${clock(c.time)}, ${ago(c.time)}</span>${err}`;
+}
+
+function renderNodes(d) {
+  const evcc = d.evcc.nodes || {};
+  $("nodes").innerHTML = (d.state.nodes || []).map(n => {
+    const ev = evcc[n.id] || {};
+    const st = n.status;
+    const pct = n.maxA > 0 ? Math.min(100, n.currentA / n.maxA * 100) : 0;
+    const m = n.meter;
+    let meter = '<span class="muted">none known</span>';
+    if (m) {
+      const mstate = !m.polled ? '<span class="muted">not polled</span>'
+        : m.stale ? `<span class="bad">stale (${m.missed} missed)</span>`
+        : m.online ? '<span class="ok">online</span>' : `<span class="warn">missed ${m.missed}</span>`;
+      meter = `<table class="kv">${kv([
+        ["meter", `${esc(m.type)} @ ${m.address} · ${mstate}`],
+        m.polled && ["currents", `<span class="num">${m.currentsA.map(a => fmt(a)).join(" / ")} A</span>`],
+        m.polled && ["power", `<span class="num">${m.powerW} W</span>`],
+        m.polled && ["energy", `<span class="num">${fmt(m.energyKWh, 2)} kWh</span>`],
+        m.polled && ["read", m.ageSeconds < 0 ? "never" : dur(m.ageSeconds) + " ago"],
+      ])}</table>`;
+    }
+    const access = n.access === "on" ? `<span class="ok">on</span>` : `<span class="warn">${esc(n.access)}</span>`;
+    return `<section class="card">
+      <div class="nodehead">
+        <span class="status ${statusClass[st] || ""}">${st === "offline" ? "✕" : esc(st)}</span>
+        <div><h2 style="margin:0">Node ${n.id} <span class="sub">bus address ${n.id + 1}</span></h2>
+        <div class="desc">${esc(statusText[st] || st)}${n.phaseSwitch ? ' · <span class="warn">paused for phase switch</span>' : ""}</div></div>
+      </div>
+      <div class="phase"><b>A</b><div class="bar"><i style="width:${pct}%"></i></div>
+        <span class="num"><b>${fmt(n.currentA)}</b> / ${fmt(n.maxA)} A</span></div>
+      <table class="kv">${kv([
+        ["state (node)", esc(stateText[n.state] || n.state)],
+        ["errors", errors(n.errors)],
+        ["access register", access],
+        ["enabled (evcc)", yes(n.enabled)],
+        ["broadcast current", `<span class="num">${fmt(n.currentA)} A</span>`],
+        ["evcc limit", `<span class="num">${fmt(n.limitA)} A</span>`],
+        ["effective max", `<span class="num">${fmt(n.maxA)} A</span> <span class="muted">min(evcc, node, config)</span>`],
+        ["phases (contactor 2)", n.phases ? n.phases + "P" : '<span class="muted">unknown</span>'],
+      ])}</table>
+      <h3>evcc → this node</h3>
+      <table class="kv">${kv([
+        ["enable", cmd(ev.enable)],
+        ["current", cmd(ev.current, " A")],
+        ["phases", cmd(ev.phases, "P")],
+        ["status read", cmd(ev.read)],
+        ev.phasesRead && ["phases read", cmd(ev.phasesRead)],
+      ])}</table>
+      <h3>EV meter</h3>${meter}
+    </section>`;
+  }).join("") || '<section class="card muted">no nodes configured</section>';
+}
+
+function renderSim(d) {
+  const s = d.simState;
+  $("simCard").hidden = !s;
+  if (!s) return;
+  $("simTable").innerHTML = `<tr><th>node</th><th>state</th><th>access</th><th>car</th><th>PWM</th><th>draw</th><th>C2 / phases</th><th>errors</th><th>meter</th></tr>` +
+    s.nodes.map(n => `<tr><td>${n.id}${n.offline ? ' <span class="bad">offline</span>' : ""}</td><td>${esc(n.state)}</td><td>${esc(n.access)}</td>
+      <td>${n.connected ? (n.wants ? "wants, " : "full, ") + "max " + fmt(n.carMaxA) + " A, " + n.phases + "P" : '<span class="muted">none</span>'}</td>
+      <td class="num">${fmt(n.pwmA)} A</td><td class="num">${fmt(n.drawA)} A</td><td>${n.enableC2} / ${n.nrOfPhases}</td><td>${errors(n.errors)}</td>
+      <td class="num">${n.meterOffline ? '<span class="bad">offline</span> ' : ""}${fmt(n.meterKWh, 3)} kWh <span class="muted">(node heard ${fmt(n.heardKWh, 3)})</span></td></tr>`).join("");
+  $("simKv").innerHTML = kv([
+    ["mains (real)", s.mainsA.map(a => fmt(a)).join(" / ") + " A"],
+    ["house load", s.houseA.map(a => fmt(a)).join(" / ") + " A"],
+    ["sensorbox", [s.sensorboxOffline ? '<span class="bad">bus offline</span>' : '<span class="ok">bus ok</span>',
+      s.sensorboxWebOffline ? '<span class="warn">web offline</span>' : "web ok", s.sensorboxP1Lost ? '<span class="warn">P1 lost</span>' : "P1 ok"].join(" · ")],
+  ]);
+}
+
+const openResp = new Set();
+function renderRequests(d) {
+  const kind = $("reqKind").value, node = $("reqNode").value;
+  const nodeSel = $("reqNode");
+  for (const n of d.state.nodes || []) {
+    if (![...nodeSel.options].some(o => o.value == n.id)) nodeSel.add(new Option("node " + n.id, n.id));
+  }
+  const calls = (d.evcc.calls || []).filter(c => {
+    if (node && String(c.node) !== node) return false;
+    if (kind === "commands") return ["enable", "current", "phases"].includes(c.kind);
+    if (kind === "errors") return c.status >= 400;
+    if (kind) return c.kind === kind || (kind === "node" && c.kind === "phasesRead");
+    return true;
+  });
+  $("reqCount").textContent = `${calls.length} of last ${(d.evcc.calls || []).length}`;
+  $("reqTable").innerHTML = `<tr><th>time</th><th>from</th><th>request</th><th>status</th><th>ms</th><th>response (click)</th></tr>` +
+    calls.map(c => `<tr><td class="num">${clock(c.time)}</td><td>${esc(c.remote)}</td>
+      <td><b>${esc(c.method)}</b> <code>${esc(c.uri)}</code></td>
+      <td class="${httpClass(c.status)}">${c.status}</td><td class="num">${fmt(c.durationMs, 1)}</td>
+      <td><div class="resp mono${openResp.has(c.seq) ? " open" : ""}" data-seq="${c.seq}">${esc(c.response)}</div></td></tr>`).join("");
+}
+document.addEventListener("click", e => {
+  const r = e.target.closest(".resp");
+  if (!r) return;
+  r.classList.toggle("open");
+  const seq = Number(r.dataset.seq);
+  if (seq) r.classList.contains("open") ? openResp.add(seq) : openResp.delete(seq);
+});
+
+function renderBus(s) {
+  const name = a => a === 9 ? "broadcast" : a === 10 ? "sensorbox" : (a >= 2 && a <= 8 && (s.nodes || []).some(n => n.id + 1 === a)) ? "node " + (a - 1) : "EV meter";
+  const rows = (s.bus || []).map(b => {
+    const fail = b.timeout + b.crc + b.exception;
+    const rate = b.tx ? (b.ok / b.tx * 100) : 0;
+    return `<tr><td>${b.address} <span class="muted">${name(b.address)}</span></td><td class="num">${b.tx}</td>
+      <td class="num ${b.address !== 9 && rate < 98 ? "warn" : ""}">${b.address === 9 ? "–" : fmt(rate, 1) + "%"}</td>
+      <td class="num ${b.timeout ? "warn" : ""}">${b.timeout}</td><td class="num ${b.crc ? "warn" : ""}">${b.crc}</td>
+      <td class="num">${b.exception}</td><td class="num">${b.retryOk}</td><td class="num ${b.lateBytes ? "warn" : ""}">${b.lateBytes}</td>
+      <td class="num">${b.staleEvents || 0}</td><td class="num">${b.latencySamples ? fmt(b.latencyP50Ms, 0) + " / " + fmt(b.latencyP99Ms, 0) : "–"}</td></tr>`;
+  }).join("");
+  $("busTable").innerHTML = `<tr><th>address</th><th>tx</th><th>ok</th><th>timeout</th><th>crc</th><th>exc</th><th>retry ok</th><th>late bytes</th><th>stale</th><th>p50 / p99 ms</th></tr>` + rows;
+}
+
+// ---- log -------------------------------------------------------------------
+const levels = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+let logSeq = 0, logs = [], hiddenBefore = 0;
+const maxLogs = 20000;
+
+async function pollLogs() {
+  if (paused) return;
+  try {
+    const r = await fetch(`api/ui/logs?after=${logSeq}&limit=${logSeq ? 5000 : 3000}`, { cache: "no-store" });
+    if (!r.ok) return;
+    const add = await r.json();
+    if (!add.length) return;
+    if (add[0].seq < logSeq) { logs = []; } // server restarted
+    logSeq = add[add.length - 1].seq;
+    logs.push(...add);
+    if (logs.length > maxLogs) logs.splice(0, logs.length - maxLogs);
+    const nodeSel = $("logNode");
+    for (const e of add) {
+      if (e.node && ![...nodeSel.options].some(o => o.value === e.node)) nodeSel.add(new Option("node " + e.node, e.node));
+    }
+    renderLogs(add);
+  } catch (e) { /* shown by poll() */ }
+}
+
+function logMatcher() {
+  const min = levels[$("logLevel").value], node = $("logNode").value, f = $("logFilter").value.trim();
+  let re = null;
+  if (f.length > 2 && f.startsWith("/") && f.endsWith("/")) { try { re = new RegExp(f.slice(1, -1), "i"); } catch (e) { re = null; } }
+  const lf = f.toLowerCase();
+  return e => {
+    if (e.seq <= hiddenBefore) return false;
+    if ((levels[e.level] ?? 1) < min) return false;
+    if (node === "-" ? e.node : node && e.node !== node) return false;
+    if (!f) return true;
+    const text = logText(e);
+    return re ? re.test(text) : text.toLowerCase().includes(lf);
+  };
+}
+const logText = e => `${clockMs(e.time)} ${e.level} ${e.node ? "node=" + e.node + " " : ""}${e.msg} ${(e.attrs || []).map(([k, v]) => `${k}=${/\s/.test(v) || v === "" ? JSON.stringify(v) : v}`).join(" ")}`;
+const logLine = e => `<div class="${esc(e.level)}"><span class="t">${clockMs(e.time)}</span> <span class="l">${esc(e.level.padEnd(5))}</span> ` +
+  `${e.node ? `<span class="n">node=${esc(e.node)}</span> ` : ""}${esc(e.msg)}` +
+  (e.attrs || []).map(([k, v]) => ` <span class="k">${esc(k)}=</span>${esc(/\s/.test(v) || v === "" ? JSON.stringify(v) : v)}`).join("") + "</div>";
+
+function renderLogs(added) {
+  const box = $("log"), match = logMatcher();
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  if (added) {
+    box.insertAdjacentHTML("beforeend", added.filter(match).map(logLine).join(""));
+    while (box.childElementCount > 5000) box.firstElementChild.remove();
+  } else {
+    box.innerHTML = logs.filter(match).slice(-5000).map(logLine).join("");
+  }
+  $("logCount").textContent = `${box.childElementCount} shown · ${logs.length} loaded`;
+  if ($("logFollow").checked && (atBottom || !added)) box.scrollTop = box.scrollHeight;
+}
+
+["logLevel", "logNode"].forEach(id => $(id).addEventListener("change", () => renderLogs()));
+let filterTimer;
+$("logFilter").addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(() => renderLogs(), 200); });
+$("logFollow").addEventListener("change", () => { if ($("logFollow").checked) $("log").scrollTop = $("log").scrollHeight; });
+$("logClear").addEventListener("click", () => { hiddenBefore = logSeq; renderLogs(); });
+$("logSave").addEventListener("click", () => {
+  const match = logMatcher();
+  const blob = new Blob([logs.filter(match).map(logText).join("\n") + "\n"], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `smartevse-master-${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+["reqKind", "reqNode"].forEach(id => $(id).addEventListener("change", () => last && renderRequests(last)));
+$("pause").addEventListener("click", () => {
+  paused = !paused;
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  if (!paused) { poll(); pollLogs(); }
+});
+
+// keep the filter choices across reloads
+for (const id of ["logLevel", "reqKind"]) {
+  try { const v = localStorage.getItem("ui." + id); if (v !== null) $(id).value = v; } catch (e) {}
+  $(id).addEventListener("change", () => { try { localStorage.setItem("ui." + id, $(id).value); } catch (e) {} });
+}
+
+poll(); pollLogs();
+setInterval(poll, 2000);
+setInterval(pollLogs, 2000);
+</script>
+</body>
+</html>
