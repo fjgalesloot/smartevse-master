@@ -67,6 +67,8 @@ type node struct {
 	unplugs  int       // transitions into A seen by the poll
 	reported int       // value of unplugs when evcc last got status A
 	showA    time.Time // reporting a missed unplug as A until then; zero = not
+	missed   int       // missed unplugs reported to evcc, for the UI
+	missedAt time.Time // last one
 }
 
 // unplugShow is how long a missed unplug is reported as A once evcc reads the
@@ -801,6 +803,7 @@ func (m *Master) evccStatus(n *node) string {
 		return "A"
 	case n.reported != n.unplugs:
 		n.reported, n.showA = n.unplugs, now.Add(unplugShow)
+		n.missed, n.missedAt = n.missed+1, now
 		m.log.Info("car unplugged and plugged in again between evcc reads: reporting disconnected once",
 			"node", n.id, "state", StateName(n.state))
 		return "A"
@@ -923,6 +926,13 @@ type NodeInfo struct {
 	MaxA     float64    `json:"maxA"`     // effective cap
 	CurrentA float64    `json:"currentA"` // what is broadcast
 	Meter    *MeterInfo `json:"meter,omitempty"`
+
+	// Car swaps between two evcc reads (unplug evcc did not see), reported to
+	// evcc as status A.
+	UnplugPending   bool    `json:"unplugPending,omitempty"`   // evcc's next read gets A
+	UnplugReporting bool    `json:"unplugReporting,omitempty"` // evcc's reads get A now
+	MissedUnplugs   int     `json:"missedUnplugs"`             // since start
+	MissedUnplugAge float64 `json:"missedUnplugAgeSeconds"`    // since the last one, -1 = none
 }
 
 // MeterInfo is a node's EV meter as polled by the master.
@@ -988,10 +998,12 @@ func (h *Node) Info() NodeInfo {
 	h.m.mu.Lock()
 	defer h.m.mu.Unlock()
 	n := h.m.nodes[h.id]
-	ni := h.m.nodeInfo(n)
-	if n.online > 0 {
-		ni.Status = h.m.evccStatus(n)
+	if n.online == 0 {
+		return h.m.nodeInfo(n)
 	}
+	status := h.m.evccStatus(n) // first: it may start reporting a missed unplug
+	ni := h.m.nodeInfo(n)
+	ni.Status = status
 	return ni
 }
 
@@ -1004,13 +1016,22 @@ func (m *Master) nodeInfo(n *node) NodeInfo {
 	if n.c2 >= 0 {
 		phases = c2Phases(n.c2)
 	}
-	return NodeInfo{
+	now := m.now()
+	ni := NodeInfo{
 		ID: n.id, Online: n.online > 0, State: StateName(n.state), Status: status, Errors: n.err,
 		Access: AccessName(n.access), Phases: phases, Switch: !n.hold.IsZero(), Enabled: n.enabled, LimitA: float64(n.limit) / 10,
 		MaxA:     float64(m.effectiveMax(n)) / 10,
 		CurrentA: float64(m.bal.Balanced[n.slot()]) / 10,
 		Meter:    m.meterInfo(n),
+
+		UnplugPending:   n.online > 0 && n.state != StateA && n.reported != n.unplugs,
+		UnplugReporting: n.online > 0 && !n.showA.IsZero() && now.Before(n.showA),
+		MissedUnplugs:   n.missed, MissedUnplugAge: -1,
 	}
+	if !n.missedAt.IsZero() {
+		ni.MissedUnplugAge = now.Sub(n.missedAt).Seconds()
+	}
+	return ni
 }
 
 func (m *Master) meterInfo(n *node) *MeterInfo {

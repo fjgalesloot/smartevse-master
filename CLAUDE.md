@@ -177,7 +177,9 @@ Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
   .meter.powerW / .meter.energyKWh; .access on/pause/off; status "offline" makes evcc error;
   an unplug (poll saw → A) that no evcc read reported yet, i.e. a car swap within one evcc
   interval, is reported as status A for 10 s from the next read (Node.Status/Info only,
-  log INFO), so evcc starts a new session; /api/state and the UI show the real state), POST /api/nodes/{id}/enable?value=,
+  log INFO), so evcc starts a new session; /api/state and the UI show the real state plus
+  .unplugPending / .unplugReporting / .missedUnplugs / .missedUnplugAgeSeconds; tests must
+  not call Info() as a mere check, it counts as an evcc read), POST /api/nodes/{id}/enable?value=,
   POST /api/nodes/{id}/current?value= (float), GET|POST /api/nodes/{id}/phases[?value=1|3]
   (evcc getphases jq .phases / phases1p3p; 400 without host, 502 node error), GET /healthz (503 on stalled loop or
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
@@ -217,3 +219,8 @@ TODO:
 - No external dependencies (stdlib only) to ease porting into evcc.
 - Currents internally in 0.1 A, like the firmware.
 - Code comments in English.
+- Every new feature or behaviour change: check whether it belongs in the web UI
+  (ui/index.html via /api/ui, usually through Snapshot/NodeInfo). If it changes what the
+  master does or reports (a state, a counter, a decision evcc or the user would wonder
+  about), add it to the UI as part of the same change; if it is unclear, ask or suggest
+  it. Syntax-check the page's script (e.g. `node --check` on the extracted <script>).

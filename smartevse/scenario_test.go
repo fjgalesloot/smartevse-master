@@ -97,7 +97,7 @@ func (h *harness) check() {
 		if n.State != StateC || n.Offline {
 			continue // a node cut off from the bus cannot be corrected; it stops on its timeout
 		}
-		info := h.m.Node(id).Info()
+		info := h.m.Snapshot().Nodes[id-1] // not Info: that is an evcc read (missed unplugs)
 		limit := float64(n.MaxA)
 		if info.LimitA > 0 {
 			limit = math.Min(limit, info.LimitA)
@@ -798,9 +798,17 @@ func TestScenarioQuickReplugReportedAsDisconnect(t *testing.T) {
 	h.run(2 * Interval)
 	h.plugIn(1)
 	h.runUntil(20*time.Second, "node 1 charging again", h.charging(1))
+	if ni := h.m.Snapshot().Nodes[0]; !ni.UnplugPending || ni.UnplugReporting || ni.MissedUnplugs != 0 {
+		t.Errorf("before evcc read: pending %v reporting %v missed %d, want pending only",
+			ni.UnplugPending, ni.UnplugReporting, ni.MissedUnplugs)
+	}
 
 	if s := evcc(); s != "A" {
 		t.Errorf("first read after swap: %s, want A", s)
+	}
+	if ni := h.m.Snapshot().Nodes[0]; ni.UnplugPending || !ni.UnplugReporting || ni.MissedUnplugs != 1 || ni.MissedUnplugAge < 0 {
+		t.Errorf("after evcc read: pending %v reporting %v missed %d age %v, want reporting, 1 missed",
+			ni.UnplugPending, ni.UnplugReporting, ni.MissedUnplugs, ni.MissedUnplugAge)
 	}
 	h.run(4 * time.Second) // other reads of the same evcc cycle
 	if s := evcc(); s != "A" {
@@ -812,6 +820,10 @@ func TestScenarioQuickReplugReportedAsDisconnect(t *testing.T) {
 	h.run(26 * time.Second) // next evcc cycle
 	if s := evcc(); s != "C" {
 		t.Errorf("next cycle: %s, want C", s)
+	}
+	if ni := h.m.Snapshot().Nodes[0]; ni.UnplugPending || ni.UnplugReporting || ni.MissedUnplugs != 1 {
+		t.Errorf("next cycle: pending %v reporting %v missed %d, want neither, 1 missed",
+			ni.UnplugPending, ni.UnplugReporting, ni.MissedUnplugs)
 	}
 
 	// an unplug evcc did see is not reported again

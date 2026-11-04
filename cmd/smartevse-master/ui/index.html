@@ -290,6 +290,19 @@ function cmd(c, unit = "") {
   return `${val}<span class="muted">${clock(c.time)}, ${ago(c.time)}</span>${err}`;
 }
 
+// A car swapped between two evcc reads: the master reports it to evcc as status A.
+function unplugNote(n) {
+  if (n.unplugReporting) return ' · <span class="warn">evcc shown disconnected (car swapped between its reads)</span>';
+  if (n.unplugPending) return ' · <span class="warn">car swapped: evcc sees disconnected on its next read</span>';
+  return "";
+}
+
+function missedUnplugs(n) {
+  const why = '<span class="muted">car swapped between two evcc reads, reported as A</span>';
+  if (!n.missedUnplugs) return `0 ${why}`;
+  return `<b>${n.missedUnplugs}</b> <span class="muted">last ${dur(n.missedUnplugAgeSeconds)} ago ·</span> ${why}`;
+}
+
 function renderNodes(d) {
   const evcc = d.evcc.nodes || {};
   $("nodes").innerHTML = (d.state.nodes || []).map(n => {
@@ -315,7 +328,7 @@ function renderNodes(d) {
       <div class="nodehead">
         <span class="status ${statusClass[st] || ""}">${st === "offline" ? "✕" : esc(st)}</span>
         <div><h2 style="margin:0">Node ${n.id} <span class="sub">bus address ${n.id + 1}</span></h2>
-        <div class="desc">${esc(statusText[st] || st)}${n.phaseSwitch ? ' · <span class="warn">paused for phase switch</span>' : ""}</div></div>
+        <div class="desc">${esc(statusText[st] || st)}${n.phaseSwitch ? ' · <span class="warn">paused for phase switch</span>' : ""}${unplugNote(n)}</div></div>
       </div>
       <div class="phase"><b>A</b><div class="bar"><i style="width:${pct}%"></i></div>
         <span class="num"><b>${fmt(n.currentA)}</b> / ${fmt(n.maxA)} A</span></div>
@@ -336,6 +349,7 @@ function renderNodes(d) {
         ["phases", cmd(ev.phases, "P")],
         ["status read", cmd(ev.read)],
         ev.phasesRead && ["phases read", cmd(ev.phasesRead)],
+        ["missed unplugs", missedUnplugs(n)],
       ])}</table>
       <h3>EV meter</h3>${meter}
     </section>`;
