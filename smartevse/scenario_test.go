@@ -768,3 +768,63 @@ func TestScenarioEVMeterReconfigured(t *testing.T) {
 		t.Errorf("node 1 stopped without EV meter")
 	}
 }
+
+// A car swapped within one evcc interval must still reach evcc as a
+// disconnect, or evcc keeps the old session and vehicle.
+func TestScenarioQuickReplugReportedAsDisconnect(t *testing.T) {
+	h := newHarness(t)
+	evcc := func() string {
+		t.Helper()
+		s, err := h.m.Node(1).Status()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info := h.m.Node(1).Info().Status; info != s {
+			t.Fatalf("Info status %s, Status %s", info, s)
+		}
+		return s
+	}
+
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
+	h.step() // the master polls the new state
+	if s := evcc(); s != "C" {
+		t.Fatalf("status %s, want C", s)
+	}
+
+	// swap cars between two evcc reads
+	h.sim.Node(1).Connected = false
+	h.runUntil(10*time.Second, "node 1 in A", func() bool { return h.state(1) == StateA })
+	h.run(2 * Interval)
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging again", h.charging(1))
+
+	if s := evcc(); s != "A" {
+		t.Errorf("first read after swap: %s, want A", s)
+	}
+	h.run(4 * time.Second) // other reads of the same evcc cycle
+	if s := evcc(); s != "A" {
+		t.Errorf("same cycle: %s, want A", s)
+	}
+	if s := h.m.Snapshot().Nodes[0].Status; s != "C" {
+		t.Errorf("snapshot status %s, want the real C", s)
+	}
+	h.run(26 * time.Second) // next evcc cycle
+	if s := evcc(); s != "C" {
+		t.Errorf("next cycle: %s, want C", s)
+	}
+
+	// an unplug evcc did see is not reported again
+	h.sim.Node(1).Connected = false
+	h.runUntil(10*time.Second, "node 1 in A", func() bool { return h.state(1) == StateA })
+	h.step()
+	if s := evcc(); s != "A" {
+		t.Errorf("unplugged: %s, want A", s)
+	}
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging again", h.charging(1))
+	h.step()
+	if s := evcc(); s != "C" {
+		t.Errorf("after a seen unplug: %s, want C", s)
+	}
+}

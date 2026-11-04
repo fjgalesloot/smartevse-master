@@ -60,7 +60,20 @@ type node struct {
 	host string    // WiFi REST API, for the contactor 2 setting
 	c2   int       // contactor 2 setting (C2AlwaysOff ...), -1 = not read yet
 	hold time.Time // phase switch: paused until the node has left C; zero = none
+
+	// A car swapped between two evcc polls is never seen as a disconnect, so
+	// evcc keeps the old session and vehicle. An unplug evcc was not shown is
+	// reported as A on the next read (see unplugShow).
+	unplugs  int       // transitions into A seen by the poll
+	reported int       // value of unplugs when evcc last got status A
+	showA    time.Time // reporting a missed unplug as A until then; zero = not
 }
+
+// unplugShow is how long a missed unplug is reported as A once evcc reads the
+// node: covers evcc's reads of one cycle (status, enabled, power, ... all hit
+// the same URI), well below its interval (default 30 s), so the next cycle
+// sees the car connected again and starts a new session.
+const unplugShow = 10 * time.Second
 
 // holdTimeout ends a phase switch pause that does not complete (C1 lasts at
 // most 6 s in the firmware, then the node goes to B1).
@@ -271,8 +284,12 @@ func (m *Master) control() {
 			n.cfgChanged = true // may have restarted with other settings
 			n.c2 = -1
 		}
+		wasOnline, prev := n.online > 0, n.state
 		n.online = 5
 		n.state, n.err, n.mode, n.access, n.maxA = int(data[1]), int(data[3]), int(data[7]), int(data[11]), int(data[15])
+		if wasOnline && prev != StateA && n.state == StateA {
+			n.unplugs++
+		}
 		if data[13] != 0 {
 			n.cfgChanged = true
 		}
@@ -759,14 +776,39 @@ func (h *Node) Status() (string, error) {
 	if n.online == 0 {
 		return "", fmt.Errorf("node %d offline", h.id)
 	}
-	switch n.state {
+	return h.m.evccStatus(n), nil
+}
+
+// statusLetter maps a node state to the IEC 61851 letter.
+func statusLetter(state int) string {
+	switch state {
 	case StateA:
-		return "A", nil
+		return "A"
 	case StateC, StateD, StateCommCOK:
-		return "C", nil
+		return "C"
 	default: // B, COMM_B, COMM_B_OK, COMM_C, ACTIVATION, B1, C1
-		return "B", nil
+		return "B"
 	}
+}
+
+// evccStatus is the status letter for evcc: A for unplugs it has not been
+// shown yet, held for unplugShow. Only evcc's reads (Status, Info) call it.
+func (m *Master) evccStatus(n *node) string {
+	now := m.now()
+	switch {
+	case n.state == StateA:
+		n.reported, n.showA = n.unplugs, time.Time{}
+		return "A"
+	case n.reported != n.unplugs:
+		n.reported, n.showA = n.unplugs, now.Add(unplugShow)
+		m.log.Info("car unplugged and plugged in again between evcc reads: reporting disconnected once",
+			"node", n.id, "state", StateName(n.state))
+		return "A"
+	case !n.showA.IsZero() && now.Before(n.showA):
+		return "A"
+	}
+	n.showA = time.Time{}
+	return statusLetter(n.state)
 }
 
 // Enabled reports whether evcc allows charging.
@@ -945,20 +987,18 @@ func (m *Master) Snapshot() Snapshot {
 func (h *Node) Info() NodeInfo {
 	h.m.mu.Lock()
 	defer h.m.mu.Unlock()
-	return h.m.nodeInfo(h.m.nodes[h.id])
+	n := h.m.nodes[h.id]
+	ni := h.m.nodeInfo(n)
+	if n.online > 0 {
+		ni.Status = h.m.evccStatus(n)
+	}
+	return ni
 }
 
 func (m *Master) nodeInfo(n *node) NodeInfo {
-	var status string
-	switch {
-	case n.online == 0:
-		status = "offline"
-	case n.state == StateA:
-		status = "A"
-	case n.state == StateC || n.state == StateD || n.state == StateCommCOK:
-		status = "C"
-	default:
-		status = "B"
+	status := "offline"
+	if n.online > 0 {
+		status = statusLetter(n.state)
 	}
 	var phases int
 	if n.c2 >= 0 {
