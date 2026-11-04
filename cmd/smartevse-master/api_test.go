@@ -15,7 +15,8 @@ func newTestAPI(t *testing.T) (http.Handler, *smartevse.Master) {
 	t.Helper()
 	sim := smartevse.NewSim(1, 2)
 	bus := smartevse.NewSimBus(sim)
-	nodes, err := parseNodes("1:16:node1, 2:10")
+	sim.Node(2).MaxA = 10
+	nodes, err := parseNodes("1:node1, 2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +49,7 @@ func TestAPINodeControl(t *testing.T) {
 	h, _ := newTestAPI(t)
 
 	code, info := do(t, h, "GET", "/api/nodes/2")
-	if code != 200 || info.Status != "A" || info.Enabled || info.LimitA != 10 {
+	if code != 200 || info.Status != "A" || info.Enabled || info.LimitA != 80 {
 		t.Fatalf("initial: %d %+v", code, info)
 	}
 	if code, info = do(t, h, "POST", "/api/nodes/2/enable?value=true"); code != 200 || !info.Enabled {
@@ -127,16 +128,16 @@ func TestAPIErrors(t *testing.T) {
 }
 
 func TestParseNodes(t *testing.T) {
-	for _, bad := range []string{"1", "a:16", "1:x", "1:16;2:16"} {
+	for _, bad := range []string{"a", "1:16", "1:16:smartevse1", "1:", "1;2"} {
 		if _, err := parseNodes(bad); err == nil {
 			t.Errorf("%q: want error", bad)
 		}
 	}
-	nodes, err := parseNodes("1:16,3:32,")
-	if err != nil || len(nodes) != 2 || nodes[1] != (smartevse.NodeConfig{ID: 3, MaxA: 32}) {
+	nodes, err := parseNodes("1,3,")
+	if err != nil || len(nodes) != 2 || nodes[1] != (smartevse.NodeConfig{ID: 3}) {
 		t.Fatalf("got %+v, %v", nodes, err)
 	}
-	nodes, err = parseNodes("1:16:smartevse1,2:16:172.29.1.41:8080")
+	nodes, err = parseNodes("1:smartevse1,2:172.29.1.41:8080")
 	if err != nil || len(nodes) != 2 || nodes[0].Host != "smartevse1" || nodes[1].Host != "172.29.1.41:8080" {
 		t.Fatalf("hosts: got %+v, %v", nodes, err)
 	}

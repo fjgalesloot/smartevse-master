@@ -6,7 +6,7 @@ services:
     command:
       - -port=/dev/ttyUSB0          # or tcp://192.168.1.50:502 (transparent RS485 gateway, raw RTU)
       - -max-mains=25
-      - -nodes=1:16:smartevse1,2:16:smartevse2   # id:maxA:host, host = node WiFi for 1P/3P switching
+      - -nodes=1:smartevse1,2:smartevse2   # id:host, host = node WiFi for 1P/3P switching; max current = the node's MAX setting
       # - -sensorbox-host=sensorbox  # mains from the Sensorbox WiFi REST API while it does not answer on the bus
       - -log-level=debug
       # - -sniff
