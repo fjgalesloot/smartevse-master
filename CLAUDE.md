@@ -187,9 +187,10 @@ Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
   ≤ 4 KB) plus the last enable/current/phases/read per node and the last /api/state read.
   logring.go: teeHandler sends records to stderr (-log-level) and an in-memory ring
   (-ui-log-level, default debug; -ui-log-lines, default 5000).
-- .github/workflows/docker.yml: go vet + test, then buildx amd64/arm64/arm/v7 to
-  ghcr.io/fjgalesloot/smartevse-master (main → :latest/:main/:sha-x, tag v1.2.3 → :1.2.3/:1.2;
-  PRs build only; docs/examples-only changes skip). Version = git describe, passed as
+- .github/workflows/docker.yml: go vet + test on pushes to main and PRs; only a tag
+  v1.2.3 also runs buildx amd64/arm64/arm/v7 to ghcr.io/fjgalesloot/smartevse-master
+  (:1.2.3/:1.2/:latest; pre-release tags like v1.2.3-beta1 only :1.2.3-beta1;
+  docs/examples-only changes skip). Version = git describe, passed as
   build arg VERSION → -X main.version (version.go; local go build: dev-<rev>), shown by
   -version, the startup log and /api/state .version. Release: push a tag v1.2.3.
 - Dockerfile: buildx multi-arch, CGO_ENABLED=0, distroless static nonroot (needs
