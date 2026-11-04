@@ -128,7 +128,7 @@ Done (`smartevse/`, stdlib only, `go vet` clean, all tests pass):
   (host "node<id>", WebBusy for 503s)
 - sim.go: optional OCPP per node (SimNode.OCPP): auto-auth transaction on plug-in,
   ended on unplug and gone 5 s later; OCPP owns access (OFF without a transaction)
-- scenario_test.go: 25 scenarios (every cycle also checks no merged frames);
+- scenario_test.go: 26 scenarios (every cycle also checks no merged frames);
   bus_timing_test.go: gaps + single transport user under concurrent API calls, late
   reply flushed, EV meter budget (dead meters never move the broadcast or overrun),
   retry/stale/implausible, merged frame in the Sim; soak_test.go: 20 seeds × 2 h random events;
@@ -174,7 +174,12 @@ Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
   -evmeter-stale-after, -bus-trace), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
 - api.go: GET /api/state (evcc grid meter: .powerW, .mainsA, error on .fault), GET /api/nodes/{id} (evcc jq .status / .enabled /
-  .meter.powerW / .meter.energyKWh; .access on/pause/off; status "offline" makes evcc error), POST /api/nodes/{id}/enable?value=,
+  .meter.powerW / .meter.energyKWh; .access on/pause/off; status "offline" makes evcc error;
+  an unplug (poll saw → A) that no evcc read reported yet, i.e. a car swap within one evcc
+  interval, is reported as status A for 10 s from the next read (Node.Status/Info only,
+  log INFO), so evcc starts a new session; /api/state and the UI show the real state plus
+  .unplugPending / .unplugReporting / .missedUnplugs / .missedUnplugAgeSeconds; tests must
+  not call Info() as a mere check, it counts as an evcc read), POST /api/nodes/{id}/enable?value=,
   POST /api/nodes/{id}/current?value= (float), GET|POST /api/nodes/{id}/phases[?value=1|3]
   (evcc getphases jq .phases / phases1p3p; 400 without host, 502 node error), GET /healthz (503 on stalled loop or
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
@@ -214,3 +219,8 @@ TODO:
 - No external dependencies (stdlib only) to ease porting into evcc.
 - Currents internally in 0.1 A, like the firmware.
 - Code comments in English.
+- Every new feature or behaviour change: check whether it belongs in the web UI
+  (ui/index.html via /api/ui, usually through Snapshot/NodeInfo). If it changes what the
+  master does or reports (a state, a counter, a decision evcc or the user would wonder
+  about), add it to the UI as part of the same change; if it is unclear, ask or suggest
+  it. Syntax-check the page's script (e.g. `node --check` on the extracted <script>).
