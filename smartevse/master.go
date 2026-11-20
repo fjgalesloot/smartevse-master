@@ -69,7 +69,18 @@ type node struct {
 	showA    time.Time // reporting a missed unplug as A until then; zero = not
 	missed   int       // missed unplugs reported to evcc, for the UI
 	missedAt time.Time // last one
+
+	// A car that stops right after its start and asks to start again (seen on
+	// hardware: a car refusing 3-phase closed and opened its relay 2-3 times).
+	startedAt  time.Time // last start approved (COMM_C_OK written)
+	startClean bool      // since then: no unplug, access ON on every poll
+	restarts   int       // starts within quickRestart of the previous one, for the UI
+	restartAt  time.Time // last one
 }
+
+// quickRestart: a start approved this soon after the previous one, without an
+// unplug or a pause in between, means the car stopped right after starting.
+const quickRestart = 30 * time.Second
 
 // unplugShow is how long a missed unplug is reported as A once evcc reads the
 // node: covers evcc's reads of one cycle (status, enabled, power, ... all hit
@@ -292,6 +303,9 @@ func (m *Master) control() {
 		if wasOnline && prev != StateA && n.state == StateA {
 			n.unplugs++
 		}
+		if n.state == StateA || n.access != AccessOn {
+			n.startClean = false
+		}
 		if data[13] != 0 {
 			n.cfgChanged = true
 		}
@@ -321,6 +335,8 @@ func (m *Master) control() {
 		m.log.Info("node state written", args...)
 		if err := m.bus.writeMultiple(n.addr, regNodeStatus, vals); err != nil {
 			m.warn("node write failed", err, "node", n.id)
+		} else if vals[0] == StateCommCOK {
+			m.started(n, now)
 		}
 	}
 
@@ -357,6 +373,18 @@ func (m *Master) control() {
 	} else {
 		m.logCurrents()
 	}
+}
+
+// started records an approved start (COMM_C_OK written) and counts a quick
+// restart: the car stopped right after the previous start and asks again.
+func (m *Master) started(n *node, now time.Time) {
+	if n.startClean && now.Sub(n.startedAt) <= quickRestart {
+		n.restarts++
+		n.restartAt = now
+		m.log.Info("car stopped right after starting and asks to start again", "node", n.id,
+			"sinceStart", now.Sub(n.startedAt).Round(time.Second), "restarts", n.restarts)
+	}
+	n.startedAt, n.startClean = now, true
 }
 
 // logStep is the change since the last log (0.1 A) above which a current set
@@ -502,6 +530,9 @@ func (m *Master) syncAccess() {
 		}
 		m.log.Info("node access set", "node", n.id, "from", AccessName(n.access), "to", AccessName(want))
 		n.access = want
+		if want != AccessOn {
+			n.startClean = false // a stop we caused is no quick restart
+		}
 	}
 }
 
@@ -933,6 +964,9 @@ type NodeInfo struct {
 	UnplugReporting bool    `json:"unplugReporting,omitempty"` // evcc's reads get A now
 	MissedUnplugs   int     `json:"missedUnplugs"`             // since start
 	MissedUnplugAge float64 `json:"missedUnplugAgeSeconds"`    // since the last one, -1 = none
+
+	Restarts   int     `json:"quickRestarts"`          // car stopped right after a start and asked again, since start
+	RestartAge float64 `json:"quickRestartAgeSeconds"` // since the last one, -1 = none
 }
 
 // MeterInfo is a node's EV meter as polled by the master.
@@ -1027,9 +1061,14 @@ func (m *Master) nodeInfo(n *node) NodeInfo {
 		UnplugPending:   n.online > 0 && n.state != StateA && n.reported != n.unplugs,
 		UnplugReporting: n.online > 0 && !n.showA.IsZero() && now.Before(n.showA),
 		MissedUnplugs:   n.missed, MissedUnplugAge: -1,
+
+		Restarts: n.restarts, RestartAge: -1,
 	}
 	if !n.missedAt.IsZero() {
 		ni.MissedUnplugAge = now.Sub(n.missedAt).Seconds()
+	}
+	if !n.restartAt.IsZero() {
+		ni.RestartAge = now.Sub(n.restartAt).Seconds()
 	}
 	return ni
 }

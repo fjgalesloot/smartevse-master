@@ -840,3 +840,47 @@ func TestScenarioQuickReplugReportedAsDisconnect(t *testing.T) {
 		t.Errorf("after a seen unplug: %s, want C", s)
 	}
 }
+
+// A car that stops right after its contactor closed and asks to start again
+// (on hardware a car refusing 3-phase: the contactor clicked on and off 2-3
+// times) is counted as quick restarts; a normal start and an evcc pause and
+// resume are not.
+func TestScenarioQuickRestart(t *testing.T) {
+	h := newHarness(t)
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
+	h.run(30 * time.Second)
+	if ni := h.m.Snapshot().Nodes[0]; ni.Restarts != 0 || ni.RestartAge != -1 {
+		t.Errorf("normal start: %d quick restarts (age %v), want none", ni.Restarts, ni.RestartAge)
+	}
+
+	// the picky car stops when the current goes up right after the start
+	h = newHarness(t)
+	h.sim.Node(1).StartPicky = true
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
+	h.run(30 * time.Second)
+	if b := h.sim.Node(1).Bounces; b == 0 {
+		t.Fatalf("picky car never stopped: the test does not reproduce a restart")
+	}
+	ni := h.m.Snapshot().Nodes[0]
+	if ni.Restarts != h.sim.Node(1).Bounces || ni.RestartAge < 0 {
+		t.Errorf("%d bounces, %d quick restarts counted (age %v)", h.sim.Node(1).Bounces, ni.Restarts, ni.RestartAge)
+	}
+	restarts := ni.Restarts
+
+	// a pause by evcc and a resume is not a quick restart
+	h.sim.Node(1).StartPicky = false
+	if err := h.m.Node(1).Enable(false); err != nil {
+		t.Fatal(err)
+	}
+	h.runUntil(20*time.Second, "node 1 stopped", func() bool { return !h.charging(1)() })
+	if err := h.m.Node(1).Enable(true); err != nil {
+		t.Fatal(err)
+	}
+	h.runUntil(20*time.Second, "node 1 charging again", h.charging(1))
+	h.run(20 * time.Second)
+	if ni := h.m.Snapshot().Nodes[0]; ni.Restarts != restarts {
+		t.Errorf("pause and resume counted as %d quick restarts", ni.Restarts-restarts)
+	}
+}

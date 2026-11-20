@@ -308,7 +308,8 @@ func (a *api) simSensorbox(w http.ResponseWriter, r *http.Request) {
 }
 
 // simNode changes the car or bus connection of a simulated node. All
-// parameters are optional: connected, wants, offline, meteroffline (bool),
+// parameters are optional: connected, wants, offline, meteroffline, picky
+// (bool: the car stops when the current changes right after its start),
 // carmax (A), phases, access (on, pause or off: as if changed on the node).
 func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))
@@ -323,7 +324,7 @@ func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 		phases *int
 		access *int
 	)
-	for _, k := range []string{"connected", "wants", "offline", "meteroffline"} {
+	for _, k := range []string{"connected", "wants", "offline", "meteroffline", "picky"} {
 		if !q.Has(k) {
 			continue
 		}
@@ -377,6 +378,9 @@ func (a *api) simNode(w http.ResponseWriter, r *http.Request) {
 		}
 		if v, ok := bools["meteroffline"]; ok {
 			n.MeterOffline = *v
+		}
+		if v, ok := bools["picky"]; ok {
+			n.StartPicky = *v
 		}
 		if carMax != nil {
 			n.CarMaxA = *carMax

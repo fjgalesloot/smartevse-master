@@ -158,6 +158,15 @@ Deliberate deviations from the firmware (all found by the simulator):
 7. No separate power read for meters whose current answer holds the phase powers
    (firmware checks the master's own EV meter type there, not the node's).
 
+Quick restarts (diagnostics only, no control change): a start approved (COMM_C_OK) ≤ 30 s
+after the previous one with no unplug or access ≠ ON in between means the car left C right
+after starting: log INFO, NodeInfo .quickRestarts / .quickRestartAgeSeconds, UI. Found on
+hardware: the MINI refused 3-phase on both nodes (closed and opened its relay 2-3 times,
+then stayed B at 0 A; fine on 1P, other cars fine on 3P), likely its onboard charger. A
+start hold at MinCurrent (v1.5.1) did not help and was removed: the firmware gives a new
+EVSE its full share at once too. Sim: SimNode.StartPicky (drops for 1 s when the PWM
+changes in its first 5 s in C), TestScenarioQuickRestart.
+
 Known, inherent (same as firmware): a sudden household load is corrected on the next
 measurement (≤ 1 cycle overload); a hard shortage stops all EVSEs after 3 cycles.
 A car drawing less than its PWM leaves "phantom" headroom that another node may get;
@@ -183,8 +192,8 @@ Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
   POST /api/nodes/{id}/current?value= (float), GET|POST /api/nodes/{id}/phases[?value=1|3]
   (evcc getphases jq .phases / phases1p3p; 400 without host, 502 node error), GET /healthz (503 on stalled loop or
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
-  /api/sim/sensorbox?offline=&weboffline=&p1lost=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=&access=
-  (access=on|pause|off as if changed on the node).
+  /api/sim/sensorbox?offline=&weboffline=&p1lost=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&picky=&carmax=&phases=&access=
+  (access=on|pause|off as if changed on the node; picky = SimNode.StartPicky).
 - Web UI (ui.go, ui/index.html embedded, no JS deps): GET / (or /ui) polls GET /api/ui
   (version, uptime, health, settings, Snapshot, evcc activity, sim state) and
   GET /api/ui/logs?after=seq&limit= every 2 s. Read-only. activity.go records every API
