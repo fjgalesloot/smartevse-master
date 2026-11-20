@@ -72,8 +72,9 @@ type SimNode struct {
 
 	// StartPicky: the car stops (pilot 9 V for a second, so the node goes C -> B)
 	// when the advertised current changes within its first startPickySecs in C,
-	// then asks again; seen on a MINI when the current jumped as the contactor
-	// closed. Bounces counts those stops.
+	// then asks again, like a car on hardware that stopped right after each start
+	// (it refused 3-phase). Used to test the quick restart count. Bounces counts
+	// those stops.
 	StartPicky bool
 	Bounces    int
 	cSecs      int // seconds in C

@@ -841,48 +841,36 @@ func TestScenarioQuickReplugReportedAsDisconnect(t *testing.T) {
 	}
 }
 
-// A car that stops when the current changes right after its contactor closed
-// (a MINI on hardware: the contactor clicked on and off three times). Without
-// a start hold the full share comes in the cycle of the start; with it the
-// node stays at MinCurrent until the car has settled, then goes up.
-func TestScenarioStartHold(t *testing.T) {
-	start := func(hold time.Duration) *harness {
-		h := newHarness(t, func(c *Config) { c.StartHold = hold })
-		h.sim.Node(1).StartPicky = true
-		h.plugIn(1)
-		h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
-		return h
+// A car that stops right after its contactor closed and asks to start again
+// (on hardware a car refusing 3-phase: the contactor clicked on and off 2-3
+// times) is counted as quick restarts; a normal start and an evcc pause and
+// resume are not.
+func TestScenarioQuickRestart(t *testing.T) {
+	h := newHarness(t)
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
+	h.run(30 * time.Second)
+	if ni := h.m.Snapshot().Nodes[0]; ni.Restarts != 0 || ni.RestartAge != -1 {
+		t.Errorf("normal start: %d quick restarts (age %v), want none", ni.Restarts, ni.RestartAge)
 	}
 
-	h := start(0)
+	// the picky car stops when the current goes up right after the start
+	h = newHarness(t)
+	h.sim.Node(1).StartPicky = true
+	h.plugIn(1)
+	h.runUntil(20*time.Second, "node 1 charging", h.charging(1))
 	h.run(30 * time.Second)
 	if b := h.sim.Node(1).Bounces; b == 0 {
-		t.Fatalf("without hold: car never stopped, the test does not reproduce the problem")
+		t.Fatalf("picky car never stopped: the test does not reproduce a restart")
 	}
-	if r := h.m.Snapshot().Nodes[0].Restarts; r == 0 {
-		t.Errorf("without hold: %d bounces but no quick restart counted", h.sim.Node(1).Bounces)
-	}
-
-	h = start(10 * time.Second)
-	if !h.m.Snapshot().Nodes[0].StartHold {
-		t.Errorf("start hold not reported right after the start")
-	}
-	h.run(8 * time.Second)
-	near(t, "during hold", h.amps(1), 6, 0.05)
-	h.run(30 * time.Second)
-	near(t, "after hold", h.amps(1), 16, 0.1)
 	ni := h.m.Snapshot().Nodes[0]
-	if b := h.sim.Node(1).Bounces; b != 0 || ni.Restarts != 0 || ni.RestartAge != -1 {
-		t.Errorf("with hold: %d bounces, %d restarts (age %v), want none", b, ni.Restarts, ni.RestartAge)
+	if ni.Restarts != h.sim.Node(1).Bounces || ni.RestartAge < 0 {
+		t.Errorf("%d bounces, %d quick restarts counted (age %v)", h.sim.Node(1).Bounces, ni.Restarts, ni.RestartAge)
 	}
-	if ni.StartHold {
-		t.Errorf("start hold still reported after it ended")
-	}
-	if h.peakOver > 0 {
-		t.Errorf("mains exceeded by %.1f A\n%s", h.peakOver, h.peakAt)
-	}
+	restarts := ni.Restarts
 
 	// a pause by evcc and a resume is not a quick restart
+	h.sim.Node(1).StartPicky = false
 	if err := h.m.Node(1).Enable(false); err != nil {
 		t.Fatal(err)
 	}
@@ -892,7 +880,7 @@ func TestScenarioStartHold(t *testing.T) {
 	}
 	h.runUntil(20*time.Second, "node 1 charging again", h.charging(1))
 	h.run(20 * time.Second)
-	if ni := h.m.Snapshot().Nodes[0]; ni.Restarts != 0 {
-		t.Errorf("pause and resume counted as %d quick restarts", ni.Restarts)
+	if ni := h.m.Snapshot().Nodes[0]; ni.Restarts != restarts {
+		t.Errorf("pause and resume counted as %d quick restarts", ni.Restarts-restarts)
 	}
 }

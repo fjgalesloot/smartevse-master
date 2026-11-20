@@ -335,7 +335,7 @@ function renderNodes(d) {
       <div class="nodehead">
         <span class="status ${statusClass[st] || ""}">${st === "offline" ? "✕" : esc(st)}</span>
         <div><h2 style="margin:0">Node ${n.id} <span class="sub">bus address ${n.id + 1}</span></h2>
-        <div class="desc">${esc(statusText[st] || st)}${n.phaseSwitch ? ' · <span class="warn">paused for phase switch</span>' : ""}${n.startHold ? ' · <span class="muted">just started: held at min current</span>' : ""}${unplugNote(n)}</div></div>
+        <div class="desc">${esc(statusText[st] || st)}${n.phaseSwitch ? ' · <span class="warn">paused for phase switch</span>' : ""}${unplugNote(n)}</div></div>
       </div>
       <div class="phase"><b>A</b><div class="bar"><i style="width:${pct}%"></i></div>
         <span class="num"><b>${fmt(n.currentA)}</b> / ${fmt(n.maxA)} A</span></div>
