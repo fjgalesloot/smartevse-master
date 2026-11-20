@@ -303,6 +303,13 @@ function missedUnplugs(n) {
   return `<b>${n.missedUnplugs}</b> <span class="muted">last ${dur(n.missedUnplugAgeSeconds)} ago ·</span> ${why}`;
 }
 
+// The car stopped right after a start and asked again: the contactor clicks.
+function quickRestarts(n) {
+  const why = '<span class="muted">car stopped within 30 s of a start and asked again</span>';
+  if (!n.quickRestarts) return `0 ${why}`;
+  return `<b class="warn">${n.quickRestarts}</b> <span class="muted">last ${dur(n.quickRestartAgeSeconds)} ago ·</span> ${why}`;
+}
+
 function renderNodes(d) {
   const evcc = d.evcc.nodes || {};
   $("nodes").innerHTML = (d.state.nodes || []).map(n => {
@@ -328,7 +335,7 @@ function renderNodes(d) {
       <div class="nodehead">
         <span class="status ${statusClass[st] || ""}">${st === "offline" ? "✕" : esc(st)}</span>
         <div><h2 style="margin:0">Node ${n.id} <span class="sub">bus address ${n.id + 1}</span></h2>
-        <div class="desc">${esc(statusText[st] || st)}${n.phaseSwitch ? ' · <span class="warn">paused for phase switch</span>' : ""}${unplugNote(n)}</div></div>
+        <div class="desc">${esc(statusText[st] || st)}${n.phaseSwitch ? ' · <span class="warn">paused for phase switch</span>' : ""}${n.startHold ? ' · <span class="muted">just started: held at min current</span>' : ""}${unplugNote(n)}</div></div>
       </div>
       <div class="phase"><b>A</b><div class="bar"><i style="width:${pct}%"></i></div>
         <span class="num"><b>${fmt(n.currentA)}</b> / ${fmt(n.maxA)} A</span></div>
@@ -341,6 +348,7 @@ function renderNodes(d) {
         ["evcc limit", `<span class="num">${fmt(n.limitA)} A</span>`],
         ["effective max", `<span class="num">${fmt(n.maxA)} A</span> <span class="muted">min(evcc, node, config)</span>`],
         ["phases (contactor 2)", n.phases ? n.phases + "P" : '<span class="muted">unknown</span>'],
+        ["quick restarts", quickRestarts(n)],
       ])}</table>
       <h3>evcc → this node</h3>
       <table class="kv">${kv([

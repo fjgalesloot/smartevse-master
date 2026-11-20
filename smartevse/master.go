@@ -27,6 +27,7 @@ type Config struct {
 	CT200A         bool          // Sensorbox CTs are 200A:50mA
 	DefaultEnabled bool          // nodes may charge before evcc sent anything
 	SensorboxHost  string        // Sensorbox-2 WiFi REST API, used while it does not answer on the bus; "" = none
+	StartHold      time.Duration // a node that starts charging stays at MinCurrent this long; 0 = none (see Balancer.StartHold)
 
 	EVMeterEvery      int           // read each EV meter every N cycles, round robin; default 2
 	EVMeterTimeout    time.Duration // response timeout of EV meter reads, 0 = from the answer size and measured latency
@@ -69,7 +70,18 @@ type node struct {
 	showA    time.Time // reporting a missed unplug as A until then; zero = not
 	missed   int       // missed unplugs reported to evcc, for the UI
 	missedAt time.Time // last one
+
+	// A car that stops right after its start and asks to start again (seen
+	// on hardware when the current jumped as the contactor closed).
+	startedAt  time.Time // last start approved (COMM_C_OK written)
+	startClean bool      // since then: no unplug, access ON on every poll
+	restarts   int       // starts within quickRestart of the previous one, for the UI
+	restartAt  time.Time // last one
 }
+
+// quickRestart: a start approved this soon after the previous one, without an
+// unplug or a pause in between, means the car stopped right after starting.
+const quickRestart = 30 * time.Second
 
 // unplugShow is how long a missed unplug is reported as A once evcc reads the
 // node: covers evcc's reads of one cycle (status, enabled, power, ... all hit
@@ -139,6 +151,9 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 	if cfg.EVMeterEvery < 0 || cfg.EVMeterStaleAfter < 0 || cfg.EVMeterTimeout < 0 {
 		return nil, fmt.Errorf("EV meter settings must not be negative")
 	}
+	if cfg.StartHold < 0 {
+		return nil, fmt.Errorf("start hold must not be negative")
+	}
 	if cfg.MaxMains < cfg.MinCurrent {
 		return nil, fmt.Errorf("max mains %d A below min current %d A", cfg.MaxMains, cfg.MinCurrent)
 	}
@@ -155,7 +170,10 @@ func NewMaster(bus *Bus, cfg Config, log *slog.Logger) (*Master, error) {
 		log:   log,
 		now:   time.Now,
 		nodes: make(map[int]*node),
-		bal:   Balancer{MaxMains: cfg.MaxMains, MaxCircuit: cfg.MaxCircuit, MinCurrent: cfg.MinCurrent},
+		bal: Balancer{
+			MaxMains: cfg.MaxMains, MaxCircuit: cfg.MaxCircuit, MinCurrent: cfg.MinCurrent,
+			StartHold: int((cfg.StartHold + Interval - 1) / Interval), // whole cycles, rounded up
+		},
 		web:   newNodeWeb(),
 		stale: map[int]int{},
 	}
@@ -292,6 +310,9 @@ func (m *Master) control() {
 		if wasOnline && prev != StateA && n.state == StateA {
 			n.unplugs++
 		}
+		if n.state == StateA || n.access != AccessOn {
+			n.startClean = false
+		}
 		if data[13] != 0 {
 			n.cfgChanged = true
 		}
@@ -304,7 +325,7 @@ func (m *Master) control() {
 
 	// 4. handshake
 	m.bal.PhasesUpdated = fresh
-	m.bal.StartedThisCycle = false
+	m.bal.NextCycle()
 	for _, n := range m.sortedNodes() {
 		if n.online == 0 {
 			continue
@@ -321,6 +342,8 @@ func (m *Master) control() {
 		m.log.Info("node state written", args...)
 		if err := m.bus.writeMultiple(n.addr, regNodeStatus, vals); err != nil {
 			m.warn("node write failed", err, "node", n.id)
+		} else if vals[0] == StateCommCOK {
+			m.started(n, now)
 		}
 	}
 
@@ -357,6 +380,18 @@ func (m *Master) control() {
 	} else {
 		m.logCurrents()
 	}
+}
+
+// started records an approved start (COMM_C_OK written) and counts a quick
+// restart: the car stopped right after the previous start and asks again.
+func (m *Master) started(n *node, now time.Time) {
+	if n.startClean && now.Sub(n.startedAt) <= quickRestart {
+		n.restarts++
+		n.restartAt = now
+		m.log.Info("car stopped right after starting and asks to start again", "node", n.id,
+			"sinceStart", now.Sub(n.startedAt).Round(time.Second), "restarts", n.restarts)
+	}
+	n.startedAt, n.startClean = now, true
 }
 
 // logStep is the change since the last log (0.1 A) above which a current set
@@ -396,6 +431,8 @@ func (m *Master) currentReason(n *node, b int) string {
 		return "not charging"
 	case n.logged == 0:
 		return "start"
+	case m.bal.Held(n.slot()) && b == m.cfg.MinCurrent*10:
+		return "start hold"
 	case b == n.limit:
 		return "evcc limit"
 	case b == n.maxA*10:
@@ -502,6 +539,9 @@ func (m *Master) syncAccess() {
 		}
 		m.log.Info("node access set", "node", n.id, "from", AccessName(n.access), "to", AccessName(want))
 		n.access = want
+		if want != AccessOn {
+			n.startClean = false // a stop we caused is no quick restart
+		}
 	}
 }
 
@@ -933,6 +973,10 @@ type NodeInfo struct {
 	UnplugReporting bool    `json:"unplugReporting,omitempty"` // evcc's reads get A now
 	MissedUnplugs   int     `json:"missedUnplugs"`             // since start
 	MissedUnplugAge float64 `json:"missedUnplugAgeSeconds"`    // since the last one, -1 = none
+
+	StartHold  bool    `json:"startHold,omitempty"`    // just started: kept at MinCurrent (Config.StartHold)
+	Restarts   int     `json:"quickRestarts"`          // car stopped right after a start and asked again, since start
+	RestartAge float64 `json:"quickRestartAgeSeconds"` // since the last one, -1 = none
 }
 
 // MeterInfo is a node's EV meter as polled by the master.
@@ -1027,9 +1071,15 @@ func (m *Master) nodeInfo(n *node) NodeInfo {
 		UnplugPending:   n.online > 0 && n.state != StateA && n.reported != n.unplugs,
 		UnplugReporting: n.online > 0 && !n.showA.IsZero() && now.Before(n.showA),
 		MissedUnplugs:   n.missed, MissedUnplugAge: -1,
+
+		StartHold: n.online > 0 && m.bal.Held(n.slot()),
+		Restarts:  n.restarts, RestartAge: -1,
 	}
 	if !n.missedAt.IsZero() {
 		ni.MissedUnplugAge = now.Sub(n.missedAt).Seconds()
+	}
+	if !n.restartAt.IsZero() {
+		ni.RestartAge = now.Sub(n.restartAt).Seconds()
 	}
 	return ni
 }

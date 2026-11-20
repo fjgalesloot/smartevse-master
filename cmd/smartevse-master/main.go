@@ -39,6 +39,7 @@ func run() error {
 		ct200          = flag.Bool("ct200", false, "Sensorbox CTs are 200A:50mA")
 		sensorboxHost  = flag.String("sensorbox-host", "", "Sensorbox-2 WiFi address: mains from its REST API while it does not answer on the bus")
 		defaultEnabled = flag.Bool("default-enabled", false, "nodes may charge before evcc enabled them")
+		startHold      = flag.Duration("start-hold", 10*time.Second, "a node that starts charging stays at -min-current this long before it gets more (some cars stop when the current jumps as the contactor closes), 0 = off")
 		interFrame     = flag.Duration("inter-frame-delay", smartevse.DefaultInterFrameDelay, "minimum silence between frames on the bus (at least 3.5 characters)")
 		turnaround     = flag.Duration("broadcast-turnaround", smartevse.DefaultBroadcastTurnaround, "extra silence after a broadcast, so the nodes can process it")
 		meterEvery     = flag.Int("evmeter-every", 2, "read each node's EV meter every N cycles (round robin)")
@@ -88,6 +89,7 @@ func run() error {
 		CT200A:         *ct200,
 		DefaultEnabled: *defaultEnabled,
 		SensorboxHost:  *sensorboxHost,
+		StartHold:      *startHold,
 
 		EVMeterEvery:      *meterEvery,
 		EVMeterTimeout:    *meterTimeout,

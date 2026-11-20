@@ -70,6 +70,16 @@ type SimNode struct {
 	CarMaxA   float64 // what the car draws at most
 	Phases    int     // 1 or 3, what the car can use
 
+	// StartPicky: the car stops (pilot 9 V for a second, so the node goes C -> B)
+	// when the advertised current changes within its first startPickySecs in C,
+	// then asks again; seen on a MINI when the current jumped as the contactor
+	// closed. Bounces counts those stops.
+	StartPicky bool
+	Bounces    int
+	cSecs      int // seconds in C
+	cPWM       int // PWM when C was entered
+	drop       int // seconds the car keeps the pilot at 9 V
+
 	// contactor 2 (1P/3P): EnableC2 is the setting (WiFi REST API only),
 	// NrOfPhases what the contactors were switched to on entering C.
 	EnableC2   int
@@ -219,6 +229,10 @@ func (s *Sim) MaxPhase() float64 {
 
 // ---- node firmware model ------------------------------------------------------
 
+// startPickySecs is how long after entering C a StartPicky car stops on a
+// change of the advertised current.
+const startPickySecs = 5
+
 type pilot int
 
 const (
@@ -232,7 +246,7 @@ func (n *SimNode) pilot() pilot {
 		return pilot12V
 	}
 	pwmOn := n.State == StateB || n.State == StateCommC || n.State == StateC
-	if n.Wants && pwmOn {
+	if n.Wants && pwmOn && n.drop == 0 {
 		return pilot6V
 	}
 	return pilot9V
@@ -281,6 +295,16 @@ func (n *SimNode) tick1s() {
 	}
 	if n.ChargeDelay > 0 {
 		n.ChargeDelay--
+	}
+	if n.drop > 0 {
+		n.drop--
+	}
+	if n.State == StateC {
+		if n.StartPicky && n.cSecs < startPickySecs && n.PWM != n.cPWM {
+			n.drop = 1
+			n.Bounces++
+		}
+		n.cSecs++
 	}
 	n.stateMachine()
 	// after the state machine: a master writing ON over OCPP's OFF gets a
@@ -357,6 +381,7 @@ func (n *SimNode) stateMachine() {
 		}
 	case StateCommCOK:
 		n.State = StateC
+		n.cSecs, n.cPWM = 0, n.PWM
 		// setState(STATE_C) switches the contactors (Force_Single_Phase_Charging, Smart mode)
 		n.NrOfPhases = c2Phases(n.EnableC2)
 	case StateC:

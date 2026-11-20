@@ -157,6 +157,15 @@ Deliberate deviations from the firmware (all found by the simulator):
    restarted with other settings; firmware only reads it at master boot or on the flag).
 7. No separate power read for meters whose current answer holds the phase powers
    (firmware checks the master's own EV meter type there, not the node's).
+8. Start hold (found on hardware, not by the simulator): a node whose start was approved
+   (COMM_C_OK) stays at MinCurrent for -start-hold (10 s, whole cycles; Balancer.StartHold,
+   NextCycle ends it, or leaving C) before it gets its share. Firmware gives the full share
+   in the start cycle; node 2's MINI then dropped C → B → COMM_C 2-3 times within 4 s
+   (contactor clicking) on every start with a jump 6 → 10-16 A, never when it stayed 6 A.
+   After the hold the current ramps up like any increase. A start approved ≤ 30 s after
+   the previous one with no unplug or access ≠ ON in between counts as a quick restart
+   (log INFO, NodeInfo .quickRestarts / .quickRestartAgeSeconds, UI). Sim: SimNode.StartPicky
+   (drops for 1 s when the PWM changes in its first 5 s in C), TestScenarioStartHold.
 
 Known, inherent (same as firmware): a sudden household load is corrected on the next
 measurement (≤ 1 cycle overload); a hard shortage stops all EVSEs after 3 cycles.
@@ -169,7 +178,7 @@ old (Timer2S + poll), so a load step is corrected a cycle later than over the bu
 
 Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
 - main.go: flags (-port, -listen :7090, -max-mains, -max-circuit, -min-current,
-  -nodes id[:host], -stale (11 s), -ct200, -sensorbox-host, -default-enabled (default false), -sim, -log-level,
+  -nodes id[:host], -stale (11 s), -ct200, -sensorbox-host, -default-enabled (default false), -start-hold (10 s, 0 = off), -sim, -log-level,
   -timeout, -inter-frame-delay, -broadcast-turnaround, -evmeter-every, -evmeter-timeout,
   -evmeter-stale-after, -bus-trace), SIGTERM
   shutdown. `-sim` advances Sim in real time (1 s ticks).
@@ -183,8 +192,8 @@ Done (`cmd/smartevse-master`, Dockerfile, `examples/`):
   POST /api/nodes/{id}/current?value= (float), GET|POST /api/nodes/{id}/phases[?value=1|3]
   (evcc getphases jq .phases / phases1p3p; 400 without host, 502 node error), GET /healthz (503 on stalled loop or
   mains fault). With -sim also GET /api/sim, POST /api/sim/house?value=l1,l2,l3,
-  /api/sim/sensorbox?offline=&weboffline=&p1lost=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&carmax=&phases=&access=
-  (access=on|pause|off as if changed on the node).
+  /api/sim/sensorbox?offline=&weboffline=&p1lost=, /api/sim/nodes/{id}?connected=&wants=&offline=&meteroffline=&picky=&carmax=&phases=&access=
+  (access=on|pause|off as if changed on the node; picky = SimNode.StartPicky).
 - Web UI (ui.go, ui/index.html embedded, no JS deps): GET / (or /ui) polls GET /api/ui
   (version, uptime, health, settings, Snapshot, evcc activity, sim state) and
   GET /api/ui/logs?after=seq&limit= every 2 s. Read-only. activity.go records every API

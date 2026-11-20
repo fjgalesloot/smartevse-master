@@ -27,8 +27,40 @@ type Balancer struct {
 	// cars plugged in together each get the full headroom.
 	StartedThisCycle bool
 
-	iset      int // IsetBalanced: total current for all charging EVSEs
-	noCurrent int // consecutive hard shortage counter
+	// StartHold is the number of cycles a newly started EVSE stays at
+	// MinCurrent (0 = none). Deviation from the firmware, which gives a new
+	// EVSE its full share at once: some cars (a MINI on hardware) stop again
+	// when the advertised current jumps right as the contactor closes, and ask
+	// to start again, so the contactor clicks on and off a few times.
+	StartHold int
+
+	iset      int          // IsetBalanced: total current for all charging EVSEs
+	noCurrent int          // consecutive hard shortage counter
+	held      [NrEVSEs]int // cycles left in the start hold
+}
+
+// NextCycle starts a control cycle: it is called once per cycle after the
+// node states were polled, before the handshake.
+func (b *Balancer) NextCycle() {
+	b.StartedThisCycle = false
+	for n := range b.held {
+		if b.State[n] != StateC {
+			b.held[n] = 0 // stopped: the next start gets a new hold
+		} else if b.held[n] > 0 {
+			b.held[n]--
+		}
+	}
+}
+
+// Held reports whether slot n is in its start hold.
+func (b *Balancer) Held(n int) bool { return b.held[n] > 0 }
+
+// limit is the most slot n may get now: Max, or MinCurrent during the start hold.
+func (b *Balancer) limit(n int) int {
+	if b.held[n] > 0 {
+		return min(b.Max[n], b.MinCurrent*10)
+	}
+	return b.Max[n]
 }
 
 // active reports whether slot n takes part in balancing.
@@ -42,7 +74,7 @@ func (b *Balancer) totals() (activeEVSE, activeMax, total int) {
 	for n := 0; n < NrEVSEs; n++ {
 		if b.active(n) {
 			activeEVSE++
-			activeMax += b.Max[n]
+			activeMax += b.limit(n)
 			total += b.Balanced[n]
 		}
 	}
@@ -78,8 +110,8 @@ func (b *Balancer) Calc(imeasured int, newEVSE bool) {
 	// Caps always apply, also in cycles without a fresh measurement (the
 	// firmware only applies BalancedMax during distribution).
 	for n := 0; n < NrEVSEs; n++ {
-		if b.State[n] == StateC && b.Balanced[n] > b.Max[n] {
-			b.Balanced[n] = b.Max[n]
+		if b.State[n] == StateC && b.Balanced[n] > b.limit(n) {
+			b.Balanced[n] = b.limit(n)
 		}
 	}
 
@@ -154,11 +186,11 @@ func (b *Balancer) Calc(imeasured int, newEVSE bool) {
 		changed = false
 		avg := remaining / left
 		for n := 0; n < NrEVSEs; n++ {
-			if b.active(n) && !set[n] && avg >= b.Max[n] {
-				b.Balanced[n] = b.Max[n]
+			if b.active(n) && !set[n] && avg >= b.limit(n) {
+				b.Balanced[n] = b.limit(n)
 				set[n] = true
 				left--
-				remaining -= b.Max[n]
+				remaining -= b.limit(n)
 				changed = true
 				break
 			}
@@ -292,6 +324,7 @@ func (b *Balancer) NodeUpdate(n, err, mode int, imeasured int, allowed, paused, 
 		if current {
 			b.StartedThisCycle = true
 			b.State[n] = StateC
+			b.held[n] = b.StartHold
 			b.Calc(imeasured, true)
 			values[0] = StateCommCOK
 			write = true
